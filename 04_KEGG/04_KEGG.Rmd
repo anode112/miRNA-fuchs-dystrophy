@@ -1,0 +1,267 @@
+---
+title: "04_miRNA_analysis: KEGG pathway search"
+author: "D. Ryazantsev, E. Sharova"
+date: "`r Sys.Date()`"
+output:
+  github_document: 
+    toc: yes
+    #toc_float: yes
+    toc_depth: 5
+    number_sections: true
+  pdf_document: 
+    latex_engine: xelatex
+    includes:
+      in_header: preamble.tex
+  word_document: 
+#bibliography: bibliography.bib
+#csl: gost-r-7-0-5-2008-numeric.csl
+link-citations: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r packages, echo=F, error=F, message=FALSE, warning=FALSE}
+library(devtools)
+library(tidyverse)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(glue) # f-strings analog
+library(pkgconfig)
+library(tximport)
+library(GenomicFeatures)
+library(DT)
+library(gridExtra)
+library(grid)
+library(matrixStats)
+library(limma) # getGeneKEGGLinks function there
+library(UpSetR)
+library(BiasedUrn)
+library(ComplexHeatmap)
+library(pathview)
+library(dplyr)
+library(DOSE)
+# renv install worked after this installation: 
+#package_url <- "https://cran.r-project.org/src/contrib/Archive/BH/BH_1.84.0-0.tar.gz"
+#utils::install.packages(pkgs = package_url, repos = NULL)
+# BiocManager::install("fgsea")
+options(bitmapType="cairo") 
+```
+
+# Analyze gene presence in KEGG pathways
+
+To assess the potential regulatory role of target genes, we examine their presence in KEGG pathway maps.
+
+**What we need to find:**
+
+1. Genes present in many pathways — the most ambiguous ones
+2. Genes with the highest co-occurrence within a single pathway — members of the same pathway
+
+`pathview` works with Entrez IDs, so gene names need to be converted.
+
+```{r}
+final_FECD_MIMAT <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/final_FECD_MIMAT_v3.RDS")
+
+downcorr_genes <- final_FECD_MIMAT$RNA %>% unique()
+
+# from symbol -> entrez_id
+entrez_ids_f <- bitr(downcorr_genes, fromType = "SYMBOL", 
+                   toType = "ENTREZID", 
+                   OrgDb = org.Hs.eg.db)
+
+# all kegg cards
+all_cards <- getGeneKEGGLinks(species.KEGG = "hsa", convert = FALSE)
+```
+
+ENTREZID enrichment into big list.
+
+```{r}
+kegg_results_f <- enrichKEGG(gene = entrez_ids_f$ENTREZID, organism = "hsa", pvalueCutoff = 0.05)
+kegg_results_f
+```
+
+### KEGG results
+
+```{r}
+# kegg_results@result[["Description"]]
+kegg_fecd_all <- kegg_results_f@result
+
+# get signiff
+kegg_fecd <- kegg_fecd_all %>% dplyr::filter(p.adjust <= 0.05)
+
+saveRDS(kegg_fecd, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/kegg_fecd_result.RDS")
+#DT::datatable(kegg_fecd, filter = 'top', caption = "All cards")
+kegg_fecd
+```
+
+### Plot p-value
+
+We will build a horizontal barplot with adjusted p-values and pathway names to visualize the identified KEGG maps. We will also include the number of gene occurrences (n).
+
+```{r plot_pv}
+for_plot <- kegg_fecd_all %>% arrange(p.adjust) %>% slice_head(n=10) %>% dplyr::select(Description, pvalue, p.adjust, Count) %>% mutate(log10pv = -log10(p.adjust)) %>% 
+	arrange(Count)
+
+
+ggplot(for_plot, aes(x=reorder(Description, Count), y=Count, fill=p.adjust)) + geom_col(show.legend =T)  + coord_flip() +  
+ # geom_label(aes(label = Count, hjust = 3, colour = "green")) + 
+  labs(title = "Top 10 KEGG Pathways") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10), legend.position = "right",
+  			axis.title.y = element_blank()) + 
+  scale_fill_gradientn(colours = c("#ff0000", "#0000ff"),  
+    name = "P-value Adjusted" ) 
+
+#only pval
+ggplot(for_plot, aes(x=reorder(Description, log10pv), y=log10pv, fill=log10pv)) + geom_col(show.legend =T)  + coord_flip() +  
+  labs(title = "Top 10 KEGG Pathways") +
+	geom_text(aes(label = Count), hjust = -0.3) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10), legend.position = "right",
+  			axis.title.y = element_blank(), axis.title.x = element_blank()) + 
+  scale_fill_gradientn(colours = c( "#0000ff", "#ff0000"),  
+    name = expression(paste("-", log[10], " p-value adjusted")) ) +
+	scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+#ggsave("./plots/kegg_top10.png",dpi=500)
+```
+
+### mir-29 kegg
+
+Same plot for mir-29 targets.
+
+```{r mir29_get_kegg}
+mir29_all <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/mir29_targets.RDS")
+mir29 <- mir29_all$gene %>% unique()
+# from symbol -> entrez_id
+mir29 <- bitr(mir29, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+mir29_kegg <- enrichKEGG(gene = mir29$ENTREZID, organism = "hsa", pvalueCutoff = 0.05)@result
+
+mir29_kegg_sign <- mir29_kegg %>% dplyr::filter(p.adjust <= 0.05)
+
+#DT::datatable(mir29_kegg_sign, filter = 'top', caption = "All cards")
+mir29_kegg_sign
+```
+
+```{r}
+for_plot <- mir29_kegg_sign %>% arrange(p.adjust) %>% slice_head(n=10) %>% dplyr::select(Description, pvalue, p.adjust, Count) %>% mutate(log10pv = -log10(p.adjust)) %>% 
+	arrange(Count)
+
+ggplot(for_plot, aes(x=reorder(Description, log10pv), y=log10pv, fill=log10pv)) + geom_col(show.legend =T)  + coord_flip() +  
+  labs(title = "Top 10 hsa-miR-29 targets' Pathways") +
+	geom_text(aes(label = Count), hjust = -0.3) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10), legend.position = "right",
+  			axis.title.y = element_blank()) + 
+  scale_fill_gradientn(colours = c( "#0000ff", "#ff0000"),  
+    name = "-log10 P-value Adjusted" ) +
+	scale_y_continuous(expand = expansion(mult = c(0, 0.17)))
+```
+
+Top 10 filled cards
+
+```{r}
+#DT::datatable(kegg_fecd[1:10,], filter = 'top', caption = "Top 10 cards")
+kegg_fecd[1:10,]
+```
+
+
+
+We will identify genes that appear most frequently across different pathways.
+
+```{r freq_counts_f}
+kegg_merged_f <- left_join(all_cards, entrez_ids_f, by = c("GeneID" = "ENTREZID"))
+frequent_counts_f <- kegg_merged_f %>% dplyr::count(SYMBOL, sort = TRUE) %>% drop_na()
+frequent_counts_f <- frequent_counts_f %>%
+  left_join(kegg_merged_f, by = "SYMBOL") %>%
+  left_join(kegg_fecd %>% dplyr::select(ID, Description), by = c("PathwayID" = "ID"))
+
+#DT::datatable(frequent_counts_f, filter = 'top')
+frequent_counts_f
+```
+
+# Visualisation with pathview
+
+```{r, eval=F}
+cpm.symbol.group <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/illumina/Fuchs_transcriptomes/analysis/transcript_analysis/RDS/expression/cpm.symbol.group_list.RDS")[[1]] %>% as.data.frame() %>% mutate_all(~ 2^.) %>% rownames_to_column('SYMBOL') 
+
+# get ENTREZID for cpm
+cpm_entrez <- bitr(cpm.symbol.group$SYMBOL, fromType = "SYMBOL", 
+                   toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# maps id
+kegg_ids <- kegg_fecd %>% pull(ID)
+kegg_ids
+```
+
+
+Plot for 1 card:
+
+```{r make1card, eval=F}
+id_for_cpm <- kegg_fecd$geneID %>% str_split("/") %>% unlist() %>% unique()
+
+for_card <-  cpm_entrez %>% left_join(cpm.symbol.group, by='SYMBOL') %>% 
+	dplyr::filter((ENTREZID %in% id_for_cpm)) %>% na.omit() %>% 
+  column_to_rownames(var="ENTREZID") %>% 
+	dplyr::mutate(FC = (FECD_exp / Ctrl), logFC = log2(FC))
+
+# cpm or FC
+gene_vec <- for_card$FECD_exp  
+names(gene_vec) <- rownames(for_card)  
+card = 'hsa04510'
+
+pathview(
+  gene.data = gene_vec,  
+  pathway.id = card,
+  gene.idtype = "entrez",
+  kegg.native = TRUE,
+  limit = list(gene = c(min(gene_vec), max(gene_vec))),
+  bins = list(gene = 20),
+  species = "hsa",
+  
+  low = list(gene = "blue"),
+  #mid = list(gene = "lightblue"),
+  mid = list(gene = "pink"),
+  high = list(gene = "red")
+  )
+```
+
+Flot for all with coloring and scale. 
+
+```{r all_cards_new_cycle, eval=F}
+for_card <-  cpm_entrez %>% left_join(cpm.symbol.group, by='SYMBOL') %>% 
+	dplyr::filter((ENTREZID %in% id_for_cpm)) %>% na.omit() %>% 
+  column_to_rownames(var="ENTREZID") %>% 
+	dplyr::mutate(FC = (FECD_exp / Ctrl), logFC = log2(FC))
+
+
+for (card in kegg_ids) {
+	selected_genes <- kegg_fecd %>% filter(ID == card) %>% dplyr::select(geneID) %>% str_split("/") %>% unlist() %>% unique()
+	
+	for_card2 <- for_card %>% dplyr::filter(rownames(for_card) %in% selected_genes)
+gene_vec <- for_card2$FECD_exp  
+names(gene_vec) <- rownames(for_card2)  
+	
+  pathview(
+  gene.data = gene_vec,  
+  pathway.id = card,
+  gene.idtype = "entrez",
+  kegg.native = TRUE,
+  limit = list(gene = c(min(gene_vec), max(gene_vec))),
+  bins = list(gene = 30),
+  species = "hsa",
+  
+  low = list(gene = "lightblue1"),
+  #mid = list(gene = "lightblue"),
+  mid = list(gene = "pink"),
+  high = list(gene = "red")
+  )
+}
+```
+

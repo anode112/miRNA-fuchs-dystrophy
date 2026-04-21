@@ -32,3 +32,6 @@ Data preparation script. It performs identifier mapping and annotation formattin
 - Mapping MIMAT IDs to miRBase GFF3 entries
 - Identifying mirtrons (miRNAs located within host genes) and nearby genomic regions
 
+### 04_KEGG pathway search
+
+KEGG enrichment analysis for miRNA targets (DEGs and miR-29). Outputs top pathways, frequency of gene occurrence, plots with `pathview`.
