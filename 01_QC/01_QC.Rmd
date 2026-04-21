@@ -1,0 +1,2498 @@
+---
+title: "01_miRNA_analysis: QC"
+author: "D. Ryazantsev, E. Sharova"
+date: "`r Sys.Date()`"
+output:
+  github_document: 
+    toc: yes
+    #toc_float: yes
+    toc_depth: 5
+    number_sections: true
+  pdf_document: 
+    latex_engine: xelatex
+    includes:
+      in_header: preamble.tex
+  word_document: 
+bibliography: citation_anode.bib
+csl: gost-r-7-0-5-2008-numeric.csl
+link-citations: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, echo = F}
+#knitr::opts_chunk$set(echo = T, message = FALSE, warning = FALSE, error = FALSE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, dpi = 40, fig.retina = 1, dev = "svglite", jpeg.quality = 85 )
+#warning suppression
+storeWarn<- getOption("warn")
+options(warn = -1)
+options(bitmapType='cairo')
+```
+
+```{r packages, echo=F, error=F, message=FALSE, warning=FALSE}
+library(ggVennDiagram) 
+library(tidyverse)
+library(pheatmap)
+#library(data.table)
+library(matrixStats)
+library(ggplot2)
+library(DT)
+library(PCAtools)
+library(RColorBrewer)
+library(readxl)
+library(limma)
+library(glue)
+library(xlsx)
+library(magick) # to rasterize plots to make it smaller
+```
+
+# Analysis of miRNA array data from patients with Fuchs' dystrophy
+
+Тут общие слова, что зачем цель, задавчи, сколько образцов etc.\
+перенести р сетап + чанк с лайбрари, емл дописать! экспортитровать таблицу с Norm data, сделать ПСА.
+
+1 подружить мета и данные по названию 2 QC дистрибьюшн, PCA
+
+# Importing data from nSolver
+
+The data was normalized and processed in nSolver (Nanostring), and then analyzed manually. Positive control samples, ligation samples, and other samples must be removed from the table.
+
+```{r data_import, eval=T, echo = F}
+#extract data as numeric
+norm_data <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_norm_data.tsv', header = T, dec = ",", skip = 2)
+colnames(norm_data) <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_norm_data.tsv', header = F, nrow = 1)
+
+norm_data <- norm_data[norm_data$`Class Name`=="Endogenous1",]
+## probes metadata
+other_data <- norm_data[, 1:19]
+norm_data <- norm_data[,20:ncol(norm_data)]
+
+row.names(norm_data) <- other_data$`Probe Name`
+
+saveRDS(norm_data, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/norm_data.RDS")
+```
+
+import other normalizations
+
+```{r raw_import, echo = F}
+# raw data
+#extract data as numeric
+raw_data <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/raw_data.tsv', header = T, dec = ",", skip = 2)
+colnames(raw_data) <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/raw_data.tsv', header = F, nrow = 1)
+
+raw_data <- raw_data[raw_data$`Class Name`=="Endogenous1",]
+## probes metadata
+other_data1 <- raw_data[, 1:19]
+raw_data <- raw_data[,20:ncol(raw_data)]
+
+row.names(raw_data) <- other_data1$`Probe Name`
+
+
+#hkg normalisation
+hkg_norm_data <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/hkg_norm_data.tsv', header = T, dec = ",", skip = 2)
+colnames(hkg_norm_data) <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/hkg_norm_data.tsv', header = F, nrow = 1)
+
+hkg_norm_data <- hkg_norm_data[hkg_norm_data$`Class Name`=="Endogenous1",]
+## probes metadata
+other_data2 <- hkg_norm_data[, 1:19]
+hkg_norm_data <- hkg_norm_data[,20:ncol(hkg_norm_data)]
+row.names(hkg_norm_data) <- other_data2$`Probe Name`
+
+
+#ligation normalisation (recommended)
+lig_norm_data <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_norm_data.tsv', header = T, dec = ",", skip = 2)
+colnames(lig_norm_data) <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_norm_data.tsv', header = F, nrow = 1)
+
+lig_norm_data <- lig_norm_data[lig_norm_data$`Class Name`=="Endogenous1",]
+## probes metadata
+other_data3 <- lig_norm_data[, 1:19]
+lig_norm_data <- lig_norm_data[,20:ncol(lig_norm_data)]
+row.names(lig_norm_data) <- other_data3$`Probe Name`
+
+
+#allgenes normalisation
+all_norm_data <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/all_norm_data.tsv', header = T, dec = ",", skip = 2)
+colnames(all_norm_data) <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/all_norm_data.tsv', header = F, nrow = 1)
+
+all_norm_data <- all_norm_data[all_norm_data$`Class Name`=="Endogenous1",]
+## probes metadata
+other_data3 <- all_norm_data[, 1:19]
+all_norm_data <- all_norm_data[,20:ncol(all_norm_data)]
+row.names(all_norm_data) <- other_data3$`Probe Name`
+
+
+#lig normalisation wo positive probes, with background tresholding
+trh_lig_norm_data <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_wo_posk_with_bgthresh.tsv', header = T, dec = ",", skip = 2)
+colnames(trh_lig_norm_data) <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_wo_posk_with_bgthresh.tsv', header = F, nrow = 1)
+trh_lig_norm_data <- trh_lig_norm_data[trh_lig_norm_data$`Class Name`=="Endogenous1",]
+## probes metadata
+other_data3 <- trh_lig_norm_data[, 1:19]
+trh_lig_norm_data <- trh_lig_norm_data[,20:ncol(trh_lig_norm_data)]
+row.names(trh_lig_norm_data) <- other_data3$`Probe Name`
+
+
+#lig normalisation wo positive probes, wo background tresholding
+nopos_lig_norm_data <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_wo_posk_wo_bgthresh.tsv', header = T, dec = ",", skip = 2)
+colnames(nopos_lig_norm_data) <- read.delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/lig_wo_posk_wo_bgthresh.tsv', header = F, nrow = 1)
+nopos_lig_norm_data <- nopos_lig_norm_data[nopos_lig_norm_data$`Class Name`=="Endogenous1",]
+## probes metadata
+other_data3 <- nopos_lig_norm_data[, 1:19]
+nopos_lig_norm_data <- nopos_lig_norm_data[,20:ncol(nopos_lig_norm_data)]
+row.names(nopos_lig_norm_data) <- other_data3$`Probe Name`
+```
+
+### Do the logarithm of the expression data
+
+Why can't we use raw data for PCA right away? For PCA, we need logarithmically smoothed data; outliers in the data will greatly distort the picture. Expression differences can vary by a factor of a million. We need to reduce the absolute difference between features; PCA works with absolute variances, so they need to be strictly logarithmized. Conventionally, we need to narrow the broad scale.
+
+If the difference is three orders of magnitude, then 10 log; if less than 2 log. But if the range is small, then, conversely, we take the square root. (The larger the logarithm base, the smaller the range the data will be in)
+
+What order of difference? (6 - 10,000, for example) =\> log10.
+
+```{r log_change}
+log_data <- lapply(norm_data, log10)
+log_data <- as.data.frame(log_data)
+rownames(log_data) <-  other_data$`Probe Name`
+```
+
+### Importing and adjusting metadata
+
+We read our objects with metadata and mark comparison groups with colors.
+
+> Pheatmap and PCATools require that the rownames (samples) in the metadata table match the colnames (samples) in the expression tables.
+
+**Добавим новую метадату с поправленным полом.**
+
+```{r metadata}
+metadata <- read_delim("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/download/metadata_with_sex.csv", 
+delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+metadata <- metadata[order(metadata$Sample_name), ] # возвращает list
+metadata <- as.data.frame(metadata)
+metadata$Sample_name <- gsub('_endo', '', metadata$Sample_name)
+
+metadata$run <- factor(metadata$run, levels = c(1, 2, 3))
+metadata <- metadata %>%  mutate(Group = if_else(FECD == "yes", "FECD", "Control"))
+metadata$Group <- factor(metadata$Group)
+
+
+rownames(metadata) <- metadata$Sample_name # for PCA
+#datatable(metadata, rownames=TRUE, caption = "FECD metadata")
+meta4limma <- metadata
+metadata <- metadata %>% dplyr::rename('Sex' = 'sex', 'Age' = 'age', 'Run' ='run')
+saveRDS(metadata, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/metadata.RDS")
+```
+
+# PCA {.tabset}
+
+We're setting up a PCA object, leaving the variability cutoff at 10% for now to remove noise. We had to downgrade [matrixStats](https://github.com/satijalab/seurat/issues/7501#issuecomment-1854571904).
+
+Let's build a PCA without the bad samples that we discarded in the downstream analysis.
+
+```{r pca_set}
+# need this
+options(matrixStats.useNames.NA = "deprecated")
+# remotes::install_version("matrixStats", version="1.1.0") # restart your session and run previous scripts
+
+metadata_pca <- metadata[!(metadata$Sample_name %in% c('Dfu_209','Dfu_210', 'Dfu_223', 'C_209', 'C_210', 'C_211')), ]
+log_data_pca <- log_data[, colnames(log_data) %in% metadata_pca$Sample_name]
+
+pca <- pca(log_data_pca, metadata = metadata_pca, removeVar = 0.1)
+rm(log_data_pca)
+```
+
+## Screeplot
+
+This plot helps us understand up to what component it makes sense to evaluate variability. The component numbers indicate the order of importance of each component in explaining data variance. The first component explains \~80% of the data. This means that the data are highly contrasting, those with high variability, and so on.
+
+```{r pca_screeplot}
+screeplot(pca, components = getComponents(pca, seq_len(6)))
+```
+
+## Pairsplot
+
+This plot shows all possible component combinations for assessing which component divides groups according to different principles.
+
+I limited the number of components to four, since one component is still the main one.
+
+```{r pca_pairsplot}
+pairsplot(pca, components = getComponents(pca, seq_len(4)),
+          colby = 'fecd_exp',
+          triangle = TRUE, trianglelabSize = 6, titleLabSize = 6, axisLabSize=5, legendPosition = 'none')
+```
+
+## Loadings
+
+This graph allows us to understand which genes determine which component. That is, if the expected groups are well separated by a component, we can immediately determine which genes contribute most, and in which direction the component deviates based on sign.
+
+Conclusion from the plot: we look at which miRNAs are in the component, with a cutoff for low contribution. On PC1, all the miRNAs are clustered together.
+
+```{r pca_loadings}
+plotloadings(pca, components = getComponents(pca, seq_len(2)), rangeRetain = 0.03,
+  col = c("red", "white", "blue"), colMidpoint = 0,
+  shape = 21, shapeSizeRange = c(3, 3),
+  axisLabSize = 10,  titleLabSize = 10)
+```
+
+## Eigencorrplot
+
+This graph allows us to understand which metadata parameters are correlated with which principal components. This means, when combined with previous data, we can understand which genes determine variability in which metadata component.
+
+The Y-axis shows the metadata pulled from our_meta. Stars indicate the correlation significance; the more stars there are, the higher the correlation.
+
+```{r pca_eigencorrplot, eval = T}
+eigencorplot(pca, components = getComponents(pca, seq_len(4)), 
+             metavars = c("Expaned_alleles", "fecd_exp", "exp", "Age"))
+```
+
+## Biplot {.tabset}
+
+Using a biplot, we can visualize the dispersion of samples in the space of specific components.
+
+Now let's look at biplots---graphs in the space of two principal components. In biplots, you can change the component numbers for visualization.
+
+### 1-2 group
+
+We look at the clustering to see if the components are separated by a straight line. If not, other components are at play.
+
+```{r biplot_12233, echo = F, fig.height=8, fig.width=9}
+xpca <- 1
+ypca <- 2
+col_by <-"Group"
+
+biplot(pca, x = "PC1", y = "PC2", pointSize = 7,
+       colby = col_by, 
+       legendPosition="right", showLoadings = F,
+       title = glue("Principle components on miRNA assay", ": ", col_by))
+```
+
+1.  The graph depicts the distribution of diseased and healthy samples in a two-component space.
+2.  It is clear that the two groups of samples:
+    1.  They are visually separable and do not mix.
+
+    2.  They cluster well within their groups.
+
+    3.  There is a small cluster of controls in the middle of the graph.
+3.  The data are suitable for FECD vs. Control analysis. The outlier in the center of the graph is likely of an unknown biological origin.
+
+### 1-2 expansion
+
+```{r echo = F, message = F, warning = F, error = F, fig.height=8, fig.width=9}
+xpca <- 1
+ypca <- 2
+col_by <-"fecd_exp"
+
+biplot(pca, x = "PC1", y = "PC2", pointSize = 7, colby = col_by, 
+       legendPosition = "right", showLoadings = F,
+       title = glue("Principle components on miRNA assay", ": ", col_by))
+```
+
+To compare the heterogeneity of the comparison groups, a principal component analysis was performed. The plot of the first two components shows that dystrophic and control samples cluster, with the presence or absence of expansion inseparable. Thus, the endothelial microRNA profile obtained using Nanostring technology is associated with the presence of Fuchs' corneal dystrophy.
+
+### 1-2 sex difference plot
+
+```{r echo = F, message = F, warning = F, error = F, fig.height=8, fig.width=9}
+xpca <- 1
+ypca <- 2
+col_by <- "Sex"
+#sex_difference echo = F, message = F, warning = F, error = F, fig.height=8, fig.width=9
+
+biplot_run <- biplot(pca, x = "PC1", y = "PC2", pointSize = 7, colby = col_by, 
+       shape = "Group", 
+       shapekey = c(FECD=18, Control=17),
+       legendPosition = "right", showLoadings = F,
+       title = glue("Principle components on miRNA assay", ": ", col_by))
+
+biplot_run
+```
+
+### 1-2 run difference
+
+```{r echo = F, message = F, warning = F, error = F, fig.height=8, fig.width=9}
+xpca <- 1
+ypca <- 2
+col_by <-'Run'
+
+biplot_run <- biplot(pca, x = "PC1", y = "PC2", pointSize = 6.5, colby = col_by, 
+                    
+       shape = "Group", labSize=3,
+       shapekey = c(FECD=16, Control=17), encircleLineSize =100,
+       legendPosition = "right", showLoadings = FALSE, drawConnectors = T,
+       min.segment.length = 0,
+       title = glue("Principle components on miRNA assay", ": ", col_by))
+biplot_run
+```
+
+1.  The graph shows the instrument run number associated with the samples.
+2.  It is clear that most patients were sequenced on one chip, while most controls were sequenced on the other two.
+3.  A batch effect is possible when comparing expression patterns for patients and healthy controls, as the data were obtained from different instrument runs.
+
+### 1-2 age difference
+
+```{r echo = F, message = F, warning = F, error = F, fig.height=8, fig.width=9}
+xpca <- 1
+ypca <- 2
+col_by <- "Age"
+
+biplot(pca, x = "PC1", y = "PC2", pointSize = 7, colby = col_by, 
+       shape = "Group", 
+       shapekey = c(FECD=18, Control=17),
+       legendPosition = "right", showLoadings = F,
+        title = glue("Principle components on miRNA assay", ": ", col_by )
+       ) + scale_color_gradientn(
+    colors = c("#E6F2FF", "#6BAED6", "#084594") )
+rm(pca)
+```
+
+1.  We will evaluate the age grouping of samples in the diseased and healthy groups using the two principal component space.
+2.  The results show that the collected samples are not balanced by age. The FECD group is significantly older than the control group.
+3.  For a more reliable biological result, controls should have been selected from a closer age group. The average age difference between a diseased and healthy individual in the sample is \~20 years.
+
+# Heatmap {.tabset}
+
+Let's compare hitmaps of different normalizations from nSolver.
+
+Reason: The raw data contains counts of the form 0, 1, 2, 3. Top 100 normalization significantly increases the values ​​in the Dfu samples. Ultimately, based on the hitmap results, we switched to ligation normalization.
+
+## raw_data
+
+```{r, fig.height=15, fig.width=13}
+heatmap(as.matrix(raw_data), cexCol = 1.5)
+```
+
+## top100 normalisation
+
+топ100 и лигация совпадают, тк мы взяли лигирование как norm_data.
+
+```{r, fig.height=14, fig.width=13}
+heatmap(as.matrix(norm_data), cexCol = 2)
+
+```
+
+## housekeeping genes normalisation
+
+```{r, fig.height=15, fig.width=13}
+heatmap(as.matrix(hkg_norm_data), cexCol = 1.5)
+```
+
+## ligation normalisation
+
+```{r, fig.height=15, fig.width=13}
+heatmap(as.matrix(lig_norm_data), cexCol = 1.5)
+```
+
+## Ligation w/o pos probes w/o thresholding
+
+```{r, fig.height=15, fig.width=13}
+heatmap(as.matrix(nopos_lig_norm_data), cexCol = 1.5)
+```
+
+## Ligation w/o pos probes with thresholding
+
+```{r, fig.height=15, fig.width=13}
+heatmap(as.matrix(trh_lig_norm_data), cexCol = 1.5)
+```
+
+## Allgenes normalisation
+
+```{r, fig.height=15, fig.width=13}
+heatmap(as.matrix(all_norm_data), cexCol = 1.5)
+```
+
+```{r echo=F}
+#rm unused
+rm(hkg_norm_data, lig_norm_data, other_data1, other_data2, other_data3, all_norm_data, trh_lig_norm_data, raw_data, nopos_lig_norm_data)
+```
+
+# Summary statistics
+
+Let's create a table with statistics. Query the Fisher test package for the contingency table. We have 0 expanded counterfields, which interferes with the Fisher test, so we'll increase the number to 1, and correspondingly increase the number of controls without expansion, thereby maintaining the proportion, assuming that 5% of the population is expanded.
+
+Metadata without discarded samples, without trimming for paired transcriptomes.
+
+```{r summary_statistics_df, echo = F}
+
+metadata <- metadata_pca
+count_f <- sum(metadata$FECD == "yes")
+count_c <- sum(metadata$FECD == "no")
+male_f <- sum(metadata$sex[metadata$FECD == "yes"] == "male")
+female_f <- sum(metadata$sex[metadata$FECD == "yes"] == "female")
+male_c <- sum(metadata$sex[metadata$FECD == "no"] == "male")
+female_c <- sum(metadata$sex[metadata$FECD == "no"] == "female")
+# age fm
+male_age <- metadata$Age[metadata$sex == "male"]
+male_age <- metadata$Age[metadata$sex == "male"]
+female_age <- metadata$Age[metadata$sex == "female"]
+age_sd_male <- signif(sd(male_age), digits=3)
+age_sd_female <- signif(sd(female_age), digits=3)
+
+paste("mean M, F age:", mean(male_age), mean(female_age))
+
+
+# sd
+age_f <- metadata$Age[metadata$FECD == "yes"]
+age_f_male <- metadata$Age[metadata$FECD == "yes" & metadata$sex == 'male']
+age_f_female <- metadata$Age[metadata$FECD == "yes" & metadata$sex == 'female']
+
+age_c <- metadata$Age[metadata$FECD == "no"]
+age_c_male <- metadata$Age[metadata$FECD == "no" & metadata$sex == 'male']
+age_c_female <- metadata$Age[metadata$FECD == "no" & metadata$sex == 'female']
+
+
+paste("CONTROL mean M, F age:", mean(age_c_male), mean(age_c_female))
+paste("FECD mean M, F age:", mean(age_f_male), mean(age_f_female))
+
+
+paste("CONTROL SD mean M, F age:", signif(sd(age_c_male), digits=3), signif(sd(age_c_female), digits=3) )
+paste("FECD SD mean M, F age:", signif(sd(age_f_male), digits=3), signif(sd(age_f_female), digits=3) )
+ 
+
+age_sd_f <- signif(sd(metadata$Age[metadata$FECD == "yes"]), digits=3)
+age_sd_c <- signif(sd(metadata$Age[metadata$FECD == "no"]), digits=2)
+exp_f <-sum(metadata$exp[metadata$FECD == 'yes'] == 'yes')
+exp_c <- sum(metadata$exp[metadata$FECD == 'no'] == 'yes')
+
+cohort_stats <- data.frame(
+  FECD = c(
+    Patients = count_f,
+    Males = male_f,
+    `Mean age ± sd` = paste(signif(mean(age_f), digits=2), "±", age_sd_f),
+    Expanded = exp_f),
+  
+  Control = c(
+    count_c, male_c, 
+    paste(signif(mean(age_c), digits=2), "±", age_sd_c), exp_c)
+)
+
+# делаем подтаблицу к каждой строке для расчётов
+contingency_table_sex <- data.frame(FECD = c(Males = male_f, Females = female_f), Control = c(male_c, female_c))
+contingency_table_exp <-  data.frame(Exp_yes = c(FECD = exp_f, Control = exp_c + 1), Exp_no = c(16 - exp_f, 19 + exp_c))
+
+# fisher test, age t-test
+ft_sex <- fisher.test(contingency_table_sex)
+ft_exp <- fisher.test(contingency_table_exp)
+ttest_age <- t.test(age_f, age_c)
+
+cohort_stats$`OR + Pval` <- c(NA, 
+                              paste('OR =', signif(ft_sex$estimate, 2), 'pval =', signif(ft_sex$p.value, 2)), 
+                              paste('T =', signif(ttest_age$statistic, 2), 'pval =', signif(ttest_age$p.value, 2)), 
+                              paste('OR =', signif(ft_exp$estimate, 2), 'pval =', signif(ft_exp$p.value, 2)))
+
+#write_csv2(cohort_stats ,'/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/download/meta_cohort_stats.csv')
+#datatable(cohort_stats)
+cohort_stats
+```
+
+# Differential expression
+
+First, we'll calculate differential expression using a t-test and the nonparametric Mann-Whitney test. Limma is the core of edgeR, DESEQ, and other tools.
+
+> Limma is a general-purpose package that can be used in any analysis on any data, as it doesn't have heuristics specific to specific data types and applications, like deseq for ngs. Limma builds a negative binomial distribution model and adjusts the weights of different genes to fit it. It works well with small samples, but for samples larger than 500, classic methods (t-test, U-test) can be used.
+
+```{r rm_outliers}
+# no outliers
+norm_data_cleaned <- norm_data[!(colnames(norm_data) %in% c('C_209', 'C_210', 'C_211', 'Dfu_209', 'Dfu_210', 'Dfu_223'))]
+meta4limma_test <- meta4limma[!(meta4limma$Sample_name %in% c('C_209', 'C_210', 'C_211', 'Dfu_209',  'Dfu_210', 'Dfu_223')), ]
+```
+
+## t-test, u-test, limma
+
+What's the test's direction – we divide DFU by Control.
+
+-   LFC \> 0 → up‑regulation in FECD.
+
+-   LFC \< 0 → down‑regulation.
+
+We need to remove the miRNA where **BOTH values ​​are low across groups**, as such pairs **are artifactual**. A value where one is 1 and the other is 0 is ok. We'll immediately filter them out of the DEGs.
+
+```{r ttest_diff_expr}
+gr_1 <- sum(grepl("C_", colnames(norm_data_cleaned)))   #8 end of 1 gr
+gr_2 <- gr_1 + 1 #  2 gr start
+
+
+deg_ttest <- do.call(rbind, 
+                      lapply(seq(1, nrow(norm_data_cleaned)), function(x)
+  {f_tt <- t.test(norm_data_cleaned[x, 1:gr_1], norm_data_cleaned[x, gr_2:ncol(norm_data_cleaned)])
+  
+  mean_c <- (mean(unlist(norm_data_cleaned[x, 1:gr_1])))
+  mean_f <- (mean(unlist((norm_data_cleaned[x, gr_2:ncol(norm_data_cleaned)]))))
+  
+  fc <- log2(mean_f / mean_c)
+  
+  return (unlist(c(fc, f_tt$p.value, mean_f, mean_c)))
+  }
+))
+
+deg_ttest <- as.data.frame(deg_ttest)
+colnames(deg_ttest) <- c('lfc', 't_pval', 'mean_f', 'mean_c')
+rownames(deg_ttest) <-  other_data$`Probe Name`
+deg_ttest <- deg_ttest %>% rownames_to_column('miRNA')
+
+# filter ZERO miRNA in BOTH groups
+low_mirna <- deg_ttest %>% filter((mean_c < 2.2) & (mean_f < 2.2)) %>% pull(miRNA)
+deg_ttest <- deg_ttest %>% filter(!(miRNA %in% low_mirna))
+deg_ttest$p_adj <- p.adjust(deg_ttest$t_pval, "fdr")
+
+# u-test
+deg_utest <- do.call(rbind, 
+                      lapply(seq(1, nrow(norm_data_cleaned)), function(x)
+  {u_tt <- wilcox.test(as.numeric(norm_data_cleaned[x, 1:gr_1]), as.numeric(norm_data_cleaned[x, gr_2:ncol(norm_data_cleaned)]))
+  fc <- log2(
+    mean(unlist((norm_data_cleaned[x, gr_2:ncol(norm_data_cleaned)]))) / mean(unlist(norm_data_cleaned[x, 1:gr_1]))
+    )
+  return (unlist(c(fc, u_tt$p.value)))
+  }
+))
+deg_utest <- as.data.frame(deg_utest)
+colnames(deg_utest) <- c('lfc', 'u_pval')
+deg_utest$p_adj <- p.adjust(deg_utest$u_pval, "fdr")
+rownames(deg_utest) <-  other_data$`Probe Name`
+deg_utest <- deg_utest %>% rownames_to_column('miRNA') %>% filter(!(miRNA %in% low_mirna))
+
+#limma
+# create groups based on metadata
+group <- factor(meta4limma_test$FECD, levels = c("no", "yes"))
+# we create a design matrix, ~0 means without including the intercept (0)   
+design <- model.matrix(~0 + group)
+colnames(design) <- c("Control", "FECD")
+# into matrix and log
+limma_matrix <- as.matrix(norm_data_cleaned)
+limma_matrix <- log2(limma_matrix)
+
+# applying a linear regression model to a matrix
+limma_fit <- lmFit(limma_matrix, design)
+
+# Contrasts for comparing groups
+contrast_matrix <- makeContrasts(FECD - Control, levels = design)
+fit2 <- contrasts.fit(limma_fit, contrast_matrix)
+# Bayesian analysis
+fit2 <- eBayes(fit2)
+
+# retrieving results
+deg_limma <- topTable(fit2, adjust.method = "fdr", number = Inf)
+deg_limma <- deg_limma %>% mutate(miRNA = rownames(.)) %>% filter(!(miRNA %in% low_mirna))
+rm(fit2, limma_fit, limma_matrix, design, group, meta4limma_test)
+```
+
+Let's also filter the dataframe
+
+```{r}
+saveRDS(low_mirna, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/low_mirna.RDS")
+norm_data_cleaned <- norm_data_cleaned %>% filter(!(rownames(.) %in% low_mirna))
+```
+
+**Filter DEGs**
+
+We filter the tables to obtain only significant microRNAs. To do this, we need to select a table consisting of rows with values ​​such that lfc \> 1, lfc \< -1, and p_adj \< 0.05.
+
+```{r filter_alltests}
+filtered_tt <- deg_ttest %>%
+  filter(p_adj <= 0.05 & (lfc > 1 | lfc < -1))
+filtered_ut <- deg_utest %>%
+  filter(p_adj <= 0.05 & (lfc > 1 | lfc < -1))
+filtered_limma <- deg_limma %>%
+  filter(adj.P.Val <= 0.05 & (logFC > 1 | logFC < -1))
+```
+
+## Intersection of genes from all tests
+
+```{r VennDiagram, fig.height=5, fig.width=5, eval=T, echo=F}
+venn <- list(T_test = as.vector((filtered_tt$miRNA)), U_test = filtered_ut$miRNA, Limma = as.vector(rownames(filtered_limma)))
+ggVennDiagram(venn) + scale_fill_gradient(low = "#F4FAFE", high = "#4981BF")
+```
+
+**Merge list of differential expression genes. Export.**
+
+We'll select genes that are present in all differential expression lists. We'll retain the LFC values ​​to allow for overlap with DEGs from another article.
+
+```{r unite_diffexpr}
+diffexpressed_mirna <- Reduce(intersect, list((filtered_tt$miRNA), (filtered_ut$miRNA), rownames(filtered_limma))) 
+diffexpressed_mirna <- filtered_limma[ diffexpressed_mirna, ]  
+saveRDS(diffexpressed_mirna, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/diffexpressed_mirna_v2.RDS")
+#DT::datatable(diffexpressed_mirna, filter = 'top')
+diffexpressed_mirna
+```
+
+**Preprocessing for further analysis**
+
+We need to obtain the names of differentially expressed miRNAs in the HGNC entry for further processing, without hsa, and move the information about 3/5p to a separate column. The resulting table contains differential expressions with the classic entry, the HGNC symbol, and the MIMAT ID.
+
+```{r formatting_names_diff_mirna}
+# hsa-miR-1234-3p -> MIR2114 
+diffexpressed_mirna_HGNC <- sapply(diffexpressed_mirna$miRNA, toupper)
+diffexpressed_mirna_HGNC <- gsub('HSA-', '', diffexpressed_mirna_HGNC)
+diffexpressed_mirna_HGNC <- as.data.frame(diffexpressed_mirna_HGNC, row.names = NULL)
+colnames(diffexpressed_mirna_HGNC) <- 'HGNC_symbol'
+# 5/3p 
+diffexpressed_mirna_HGNC$strand <- ifelse(grepl("5P", diffexpressed_mirna_HGNC$HGNC_symbol), "5P",
+                             ifelse(grepl("3P", diffexpressed_mirna_HGNC$HGNC_symbol), "3P", "5P"))
+
+diffexpressed_mirna_HGNC$HGNC_symbol <- gsub('-', '', gsub('-5P', '', gsub('-3P', '', diffexpressed_mirna_HGNC$HGNC_symbol)))
+
+# вручную добавляем названия мирнк (почему - см ниже)
+diffexpressed_mirna_HGNC <- rbind(diffexpressed_mirna_HGNC, data.frame(HGNC_symbol = c("MIR128-1", "MIR128-2", "MIR1283-1", "MIR1283-2"), strand = c('-', '-', '-', '-'), stringsAsFactors = FALSE))
+
+diffexpressed_mirna_HGNC$miRNA <- row.names(diffexpressed_mirna_HGNC)
+
+# MIMAT id 
+diffexpressed_mirna_HGNC <- merge(diffexpressed_mirna_HGNC, other_data[, c("Probe Name", "Accession #")], 
+                          by.x = "miRNA", by.y = "Probe Name")
+diffexpressed_mirna_HGNC <- rename(diffexpressed_mirna_HGNC, 'MIMAT_ID' = "Accession #")
+
+saveRDS(diffexpressed_mirna_HGNC, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/diffexpressed_mirna_HGNC.RDS")
+
+#DT::datatable(diffexpressed_mirna_HGNC, caption = "Дифэкспрессированная микроРНК")
+diffexpressed_mirna_HGNC
+```
+
+### Volcano plot DEG
+
+We are building a Volcano plot using all our DEGs.
+
+```{r mir_volcano, echo=F}
+logFC_cutoff <- 1
+pval_cutoff <- 0.05
+
+for_plot <- deg_ttest %>%
+  mutate(
+    Expression = case_when(
+      p_adj < pval_cutoff & lfc > logFC_cutoff & miRNA %in% diffexpressed_mirna$miRNA ~ "Upregulated",
+      p_adj < pval_cutoff & lfc < -logFC_cutoff & miRNA %in% diffexpressed_mirna$miRNA ~ "Downregulated",
+      TRUE ~ "Not significant"))
+
+#Volcano plot of differentially expressed miRNAs
+ggplot(for_plot, aes(x = lfc, y = -log10(p_adj), color = Expression)) +
+  geom_point(size = 1.5, alpha = 0.7) +
+  scale_color_manual( name = "miRNA expression" ,
+  	values = c("Upregulated" = "#D6604D", "Downregulated" = "#2166AC", "Not significant" = "grey")) +
+  geom_vline(xintercept = c(-logFC_cutoff, logFC_cutoff), linetype = "dashed") +
+  geom_hline(yintercept = -log10(pval_cutoff), linetype = "dashed") +
+  #geom_text(vjust = -1, size = 3) +
+	geom_text_repel(aes(label = miRNA), size = 2, max.overlaps = 4) +
+  theme_minimal() +
+  labs(
+    title = "",
+    x = expression(paste(log[2], " Fold Change")),
+    y = expression(paste("-", log[10], " p-value adjusted"))) + 
+	xlim(-12, 4.5) + ylim(0, 3.2)
+
+for_plot %>% summarise(n_upregulated = sum(Expression == "Upregulated"),
+											 n_downregulated = sum(Expression == "Downregulated"),
+											 total_DEGs = n_upregulated + n_downregulated) #%>% DT::datatable(caption = " Up and downregulated miRNA's DEG")
+```
+
+### Boxplots DEG miRNAs
+
+Build in log scale or without? -- Better in regular counts, it's more visual.
+
+All together, ordered by logFC (-,+)
+
+```{r boxplots_deg_all, fig.height= 16, fig.width= 20, echo = F}
+for_plot <- norm_data_cleaned[rownames(norm_data_cleaned) %in% (diffexpressed_mirna$miRNA), ]
+for_plot <- for_plot %>%
+  rownames_to_column("miRNA") %>% 
+  pivot_longer(cols = -miRNA, names_to = "Sample", values_to = "Expression") %>% 
+  mutate(Group = case_when(
+    str_detect(Sample, "C") ~ "Control",
+    str_detect(Sample, "D") ~ "FECD"
+  )) %>% 
+  group_by(miRNA, Group) %>%
+  mutate(
+    Q1 = quantile(Expression, 0.25),
+    Q3 = quantile(Expression, 0.75),
+    IQR = Q3 - Q1,
+    is_outlier = ifelse(Expression < (Q1 - 1.5 * IQR) | Expression > (Q3 + 1.5 * IQR), T, F)
+  ) %>%
+  ungroup() %>% left_join(diffexpressed_mirna, by='miRNA') 
+
+
+ggplot(for_plot,  aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(show.legend = T)+
+  scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+  geom_jitter(position=position_jitter(0.3), cex=1) +
+  geom_text(
+    data = filter(for_plot, is_outlier), aes(label = Sample),
+    position = position_jitter(width = 0.2), vjust = -1, size = 1.5,
+    color = "black") +
+  
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 30, hjust = 0.5),
+        strip.text = element_text(size = 10)) +
+  labs(
+    title = "Differentially expressed miRNA", y = "Expression Level", x='') +
+  facet_wrap(~reorder(miRNA, logFC), scales = "free")
+```
+
+UP and DOWN separately.
+
+```{r fig.height= 16, fig.width= 20}
+for_plot_long <- for_plot %>% filter(logFC < 0)
+ggplot(for_plot_long,  aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(show.legend = T)+
+  scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+  geom_jitter(position=position_jitter(0.3), cex=1) +
+  geom_text(
+    data = filter(for_plot_long, is_outlier), aes(label = Sample),
+    position = position_jitter(width = 0.2), vjust = -1, size = 1.5,
+    color = "black") +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 20, hjust = 0.5),
+        strip.text = element_text(size = 10)) +
+  labs(y = "Expression Level", x='', title = 'DEGs downregulated') +
+  facet_wrap(~reorder(miRNA, logFC), scales = "free")
+
+for_plot_long <- for_plot %>% filter(logFC > 0)
+ggplot(for_plot_long,  aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(show.legend = T)+
+  scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+  geom_jitter(position=position_jitter(0.3), cex=1) +
+  geom_text(
+    data = filter(for_plot_long, is_outlier), aes(label = Sample),
+    position = position_jitter(width = 0.2), vjust = -1, size = 1.5,
+    color = "black") +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 20, hjust = 0.5),
+        strip.text = element_text(size = 10)) +
+  labs(y = "Expression Level", x='', title = 'DEGs upwnregulated') +
+  facet_wrap(~reorder(miRNA, logFC), scales = "free")
+
+for_plot_long <- for_plot %>%
+  group_by(miRNA, Sample) %>% arrange(desc(logFC)) %>% slice_head(n = 3) %>% ungroup() %>%
+  bind_rows(
+    for_plot %>% group_by(miRNA, Sample) %>% arrange(logFC) %>% slice_head(n = 3) %>% ungroup() ) %>% ungroup()
+
+```
+
+For article version
+
+```{r }
+top_miRNA <- for_plot %>% distinct(miRNA, logFC) %>% arrange(desc(logFC)) %>%
+  {bind_rows(slice_head(., n = 8), slice_tail(., n = 8))} %>% pull(miRNA)              
+
+for_plot_long <- for_plot %>% filter(miRNA %in% top_miRNA)
+
+ggplot(for_plot_long,  aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(show.legend = T, outliers = F)+
+  scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+  geom_jitter(position=position_jitter(width = 0.3, height = 0),  size = 0.7, shape = 16, alpha = 0.7 ) +
+# 	geom_text_repel(  
+#     data = filter(for_plot_long, is_outlier),
+#     aes(label = Sample),
+#     size = 1.7, color = "black", box.padding = 0.1,   
+#     point.padding = 0.3, min.segment.length = 0, segment.size = 0.3,      
+#     segment.color = "grey50",
+#     position = position_jitter(width = 0.2)) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(size = 20, hjust = 0.5),
+        strip.text = element_text(size = 7.2)) +
+  labs(y = "Expression level (normalized counts)", x='') +
+  facet_wrap(~reorder(miRNA, logFC), scales = "free") 
+```
+
+# ⭐Comparison with DEGs from another article
+
+Let's compare our DEGs with the DEGs obtained earlier from another article on miRNA in FECD ([Article link](https://iovs.arvojournals.org/article.aspx?articleid=2128120)). List of DEGs is in suppl materials. Also add a table with a list of miRNAs from their array (TaqMan Open Array) and compare our arrays.
+
+Are the data logarithmic? Let's fix this I thought they were logarithmic because there were negative values, but in fact this is not the case.
+
+If FC = 0.5, that is, half as much, then it is the same as -2 times as much, that is, FC -2. To obtain such a value, you need $$negFC = -1 / FC$$To return them to the normal scale, i need to $-1/negFC$.
+
+We need to bring them into logFC, and our accounts into negFC, compare both ways.
+
+```{r matthaei_degs, echo=F}
+matthaei_degs <- read.delim("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/Matthaei_miRNA_DEGs.tsv") 
+
+matthaei_degs <- matthaei_degs %>% filter(FoldChange != 'N/A') %>% 
+  mutate(FoldChange = str_replace_all(FoldChange, ",", "")) %>% 
+  as_tibble() %>%
+  mutate(across(c(FoldChange, P.Value), as.numeric)) %>% 
+  mutate(miRNA_raw = str_extract(Assay.Name_ID, "^[^_]+") %>%  
+           str_replace_all(., "[#*]", "")) %>% na.omit() %>% 
+  mutate(trueFC = if_else(FoldChange < 0, -1/FoldChange, FoldChange), 
+         logFC = log2(trueFC), 
+         Assay_ID = str_extract(Assay.Name_ID, "(?<=_)[^_]+$"))
+
+# translate to hgnc
+matthaei_degs <- matthaei_degs %>% mutate(
+    HGNC_name = {
+      x <- toupper(miRNA_raw) %>%
+           gsub('HSA-', '', .) %>%
+           gsub('-5P|-3P', '', .) %>%
+           gsub('-', '', .)
+      x
+    },
+    strand = ifelse(grepl("5P", toupper(miRNA_raw)), "5P",
+                   ifelse(grepl("3P", toupper(miRNA_raw)), "3P", "5P")))
+
+# add assay
+taqman_assay <- read_excel("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/upload/matthei-assay-megaplex-pools-array-card-content.xlsx", sheet = 'Human A')
+
+matthaei_degs <- matthaei_degs %>% left_join(taqman_assay, by= c('Assay_ID' = 'Assay ID')) %>% rename('miRNA' = 'miRBase ID (v22) or NCBI Name (for Controls)') %>% select(-`Control Assay`)
+
+
+matthaei_degs_sign <- matthaei_degs %>% filter(P.Value <= 0.05, FoldChange <= -3)
+saveRDS(matthaei_degs, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/matthaei_degs.RDS")
+```
+
+Let's intersect their essays with ours, then their essays with the DEGs from their article.
+
+```{r, echo=F}
+venn <- list(`Nanostring nCounter` = as.vector(rownames(norm_data)), `OpenArray Panel` = taqman_assay$`miRBase ID (v22) or NCBI Name (for Controls)`)
+# miRNA intersection of Nanostring nCounter Human v3 miRNA Expression Assay with TaqMan OpenArray Human MicroRNA Panel
+ggVennDiagram(venn, label = "count") + 
+  #scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + 
+  coord_flip() +
+  labs(title = "miRNA intersection of Nanostring Expression Assay with TaqMan") + theme(legend.position="none") + 
+  scale_y_continuous(expand = expansion(mult = .14)) +
+  scale_fill_distiller(palette = "Blues", direction = 1)
+
+
+venn <- list(Matt_assayID = matthaei_degs$Assay_ID, Matth_Assay = taqman_assay$`Assay ID`)
+ggVennDiagram(venn) + 
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip() +
+  labs(title = "Matthei DEGs vs TaqMan assay all miRNA") + theme(legend.position="none") + scale_y_continuous(expand = expansion(mult = .14))
+
+venn <- list(`Current study miRNA` = deg_ttest$miRNA, `Matthaei et. al DEGs` = matthaei_degs$miRNA )
+ggVennDiagram(venn, label = "count") + 
+  #scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + 
+  coord_flip() +
+  labs(title = "") + theme(legend.position="none")+ 
+  scale_y_continuous(expand = expansion(mult = .14)) +
+  scale_fill_distiller(palette = "Blues", direction = -1)
+```
+
+Intersection of our and their miRNA DEGs (100%)
+
+```{r, echo=F}
+venn <- list(`Our signif DEGs` = as.vector(diffexpressed_mirna$miRNA), `Matth all DEGs` = matthaei_degs$miRNA)
+
+ggVennDiagram(venn) + scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip() + labs(title = "Currents study and Matthaei DEGs intersection")
+
+venn <- list(Nanostring = rownames(norm_data), Matth_DEGs = matthaei_degs$miRNA)
+
+ggVennDiagram(venn) + scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip() + 
+  labs(title = "Intersection of our Nanostring assay with Matthei DEGs")
+```
+
+Fold change values distribution from both data.
+
+```{r, echo=F}
+ggplot() +
+  geom_bar(aes(x = logFC , color = "matthaei_degs"), 
+               data = matthaei_degs, linewidth = 1) + 
+  geom_bar(aes(x = logFC, color = "diffexpressed_mirna"), 
+               data = diffexpressed_mirna, linewidth = 0.6) +
+  scale_color_manual(name = "Dataset",
+                     values = c("matthaei_degs" = "blue", 
+                               "diffexpressed_mirna" = "red")) + theme_minimal()
+
+for_plot <- bind_rows(
+  matthaei_degs %>% select(logFC) %>% mutate(Dataset = "Matthaei"),
+  diffexpressed_mirna %>% select(logFC) %>% mutate(Dataset = "OurDEGS"))
+
+ggplot(for_plot, aes(x = logFC, fill = Dataset)) +
+  geom_density(alpha = 0.6, linewidth = 0.8) +
+  facet_wrap(~ Dataset, ncol = 1, scales = "free") +  
+  scale_fill_manual(values = c("Matthaei" = "blue", "OurDEGS" = "red")) +
+  labs(x = "Log2 Fold Change", y = "Density") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+```
+
+## FC correlations scatter between Matt & Ours
+
+Let us check whether the FCs of intersecting miRNAs correlate between DEGs and between all occurrences.
+
+```{r fc_corr_plot1, echo=F}
+deg_no_outl <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/deg_no_outl.RDS")
+
+both_degs <- inner_join (
+  diffexpressed_mirna %>%  mutate(Dataset = "OurDEGS"),  
+                         matthaei_degs %>% mutate(Dataset = "Matthaei") %>%  select(miRNA, logFC, P.Value,Dataset, ), suffix = c(".our", ".matt"), by='miRNA')
+
+title_name = "matching DEGS betw both articles"
+
+ggplot(both_degs, aes(x = logFC.our, y = logFC.matt)) +
+  geom_point(size = 5, alpha = 0.7) +
+  geom_text_repel(aes(label = miRNA), size = 3, max.overlaps = 20) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(x = "logFC (Our DEGs)", y = "logFC (Matthaei)",
+    title = title_name, color = "miRNA") +
+  theme_minimal() 
+```
+
+Let's try to take **all of our FCs, not just DEGs,** and pull the values ​​from the T-test (not from the limma, because it calculates them more cleverly). This way we will understand whether our data distributions are the same. We expect that they are. Note mir-29.
+
+```{r corr_all_FC, echo=F}
+# with all FC values + deg colouring
+for_plot <- inner_join (
+  deg_ttest %>%  mutate(Dataset = "OurDEGS"), 
+  matthaei_degs %>% mutate(Dataset = "Matthaei") %>% select(-Assay.Name_ID), suffix = c(".our", ".matt"), by='miRNA') %>% 
+  mutate(with_d = if_else(miRNA %in% diffexpressed_mirna$miRNA,  'DEG', 'no DEG'),
+         dset = case_when(
+miRNA %in% deg_no_outl$miRNA & miRNA %in% diffexpressed_mirna$miRNA ~ 'DEG was in no_outliers',
+!(miRNA %in% deg_no_outl$miRNA) & miRNA %in% diffexpressed_mirna$miRNA ~ 'new DEGs',
+!(miRNA %in% deg_no_outl$miRNA) & !(miRNA %in% diffexpressed_mirna$miRNA) ~ 'not DEG',
+(miRNA %in% deg_no_outl$miRNA) & !(miRNA %in% diffexpressed_mirna$miRNA) ~ 'not DEG'
+)) %>% 
+  
+  mutate(
+    pl_size = if_else(miRNA %in% diffexpressed_mirna$miRNA | miRNA %in% matthaei_degs_sign$miRNA, 3,  0.5),
+    # colour degs our mat no
+    pl_col = case_when(
+(miRNA %in% diffexpressed_mirna$miRNA & miRNA %in% matthaei_degs_sign$miRNA) ~ 'cyan',
+miRNA %in% diffexpressed_mirna$miRNA ~ 'red',
+miRNA %in% matthaei_degs_sign$miRNA ~ 'blue',
+!(miRNA %in% diffexpressed_mirna$miRNA) & !(miRNA %in% matthaei_degs_sign$miRNA) ~ 'grey70') %>% as.factor(),
+# set shape for mir29
+pl_shape = if_else(str_detect(miRNA, 'miR-29') , 2, 19)
+)
+
+
+title_name = "logFC miRNA betw datasets, all our FC"
+# total
+ggplot(for_plot, aes(x = lfc, y = logFC, size = pl_size)) +
+  geom_point( alpha = 0.6) + 
+  geom_text_repel(aes(label = miRNA), size = 3, max.overlaps = 10) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(x = "Our logFC for all MIR", y = "logFC Matthaei DEGs",
+    title = title_name , color = "miRNA") +
+  theme_minimal() 
+
+ggplot(for_plot, aes(x = lfc, y = logFC, colour=with_d)) +
+  geom_point(alpha = 0.5)  +
+  geom_text_repel(aes(label = miRNA), size = 2, max.overlaps = 10) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(x = "Our logFC for all MIR", y = "logFC Matthaei DEGs",
+    title = title_name , color = "miRNA") + theme_minimal() 
+
+
+# final
+ggplot(for_plot, aes(x = lfc, y = logFC, size=pl_size, colour=pl_col, shape = pl_shape)) +
+  geom_point(alpha = 0.5) + scale_size_identity() + # identity ест без фактора
+  scale_shape_identity() +
+  geom_text_repel(aes(label = miRNA), size = 2, max.overlaps = 10) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(x = "Our logFC for all MIR", y = "logFC Matthaei DEGs",
+    title = 'all' ) + theme_minimal() +
+  scale_color_identity(guide = "legend",
+    labels = c(
+      "red" = "Our DEGs only",
+      "blue" = "Matthaei DEGs only",
+      "cyan" = "Both DEGs",
+      "grey70" = "Not significant"
+    ))
+```
+
+Let's do it differently: ours - theirs: blue pink, deg not deg is form. Let's take only the significant deg from them.
+
+```{r fig.width=10, fig.height=7, echo=F}
+for_plot <- inner_join (
+  deg_ttest %>% mutate(Dataset = "OurDEGS"), 
+  matthaei_degs %>% mutate(Dataset = "Matthaei") %>% select(-Assay.Name_ID), suffix = c(".our", ".matt"), by='miRNA') %>% 
+  mutate(
+    # our deg-not
+    pl_size = if_else(miRNA %in% diffexpressed_mirna$miRNA,5,  2),
+    # matt deg-not
+    pl_col = if_else((miRNA %in% matthaei_degs_sign$miRNA), 'DEG','not DEG') %>% as.factor(),
+pl_mir = if_else(str_detect(miRNA, 'miR-29[abc]'), miRNA, NA_character_),
+shape_mir = if_else(str_detect(miRNA, 'miR-29[abc]'), 2, 19)
+)
+
+
+ggplot(for_plot, aes(x = lfc, y = logFC,  size = pl_size,  colour=pl_col, shape=shape_mir) )+
+  geom_point(alpha = 0.7) +   # identity ест без фактора
+  geom_text_repel(aes(label = if_else(is.na(pl_mir), miRNA, NA_character_ )), size = 2.5, max.overlaps = 3, segment.color = "grey50") +
+ 
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = 3, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = -3, linetype = "dashed", color = "gray50") +
+	
+  geom_hline(yintercept = 0,  color = "black") +
+	geom_vline(xintercept = 0, color = "black") +
+	
+  labs(x = expression("miRNA" ~ log[2]("FC") ~ "current study"), 
+  		 y = expression("miRNA" ~ log[2]("FC") ~ " Matthaei et. al., 2014"),
+    title = '') + theme_minimal() +
+  scale_size_identity(
+    guide = "legend",
+    breaks = c(5, 2),
+    labels = c("DEG", "not DEG" ),
+    name = "Current study") +
+  
+  geom_text_repel(
+    aes(label = if_else(is.na(pl_mir), NA_character_, miRNA)), 
+    segment.color = "grey50", segment.size = 3.5, box.padding = 0.3,
+    size = 2.2, colour='black', max.overlaps = 3, na.rm = T, max.time = 5.5) +
+  scale_color_manual(name = "Matthaei et. al., 2014",
+                     values = c("DEG" = "#1f77b4",  
+                               "not DEG" = "#ff7f0e"))  +xlim(-7, 2.5) + scale_shape_identity() 
+
+
+
+both_degs <- for_plot %>% filter(pl_size == 5 & pl_col == 'DEG') 
+both_degs #%>% DT::datatable(caption='Both DEGS Matthei & Current', filter = 'top')
+
+final_FECD_MIMAT <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/final_FECD_MIMAT_v3.RDS")
+
+final_FECD_MIMAT %>% filter(miRNA %in% both_degs$miRNA) #%>% DT::datatable(caption = 'Both DEGs presented in downcorr pairs')
+```
+
+compare FC from limma vs FC from classic way. – They're almost the same.
+
+```{r fc_difference}
+for_plot <- left_join(deg_limma, deg_ttest , by='miRNA') %>% 
+  rename(manual_FC = lfc, limma_FC = logFC) %>% pivot_longer(cols = c(manual_FC, limma_FC), names_to = 'Test', values_to = 'logFC') 
+
+ggplot(for_plot, aes(x=reorder(miRNA, logFC), y=(logFC), fill=Test)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7)
+
+ggplot(for_plot, aes( x=(logFC), fill=Test)) + geom_density(alpha=0.4)
+```
+
+```{r get_annot, echo=F}
+chip_mimat <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/chip_mimat.RDS")
+mimat_table <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/mimat_table.RDS")
+```
+
+# Сonfirm the expression through CPM {.tabset}
+
+Let's confirm expression using CPM: plot a scatterplot of the correlation between counts (not just DEGs) from the assay and counts from CPM. If it's positive, the counts are not artifactual.
+
+CPM contains some values ​​for both the miRNA and its gene (HG - host gene). We'll look at the expression of the host genes present in our dataset. We need to plot this on all miRNAs, not just HG.
+
+```{r add_coord_beds, echo=F}
+mirtrones <- read_delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/download/annot_chipdf_genes_s_y.bed', delim = '\t', col_names = c("seqnames", "start", "end", "gene_id","gene_name", "strand","type", "gene_type", "seqnames_mir", "start_mir", "end_mir", "gene_id_mir","gene_name_mir", "strand_mir","type_mir"))
+mirtrones <- mirtrones %>% filter(type == 'gene', gene_type == 'protein_coding')
+
+mirtrones_mimat <- read_delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/download/chip_mimat_s_y.bed', delim = '\t', col_names = c("seqnames", "start", "end", "gene_id","gene_name", "strand","type", "gene_type", "seqnames_mir", "start_mir", "end_mir", "gene_id_mir","gene_name_mir", "strand_mir","Alias", "ID", "Derives_from",    "type_mir")) %>% filter(type == 'gene', gene_type == 'protein_coding')
+
+mirtrones_matthaei <- read_delim('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/download/matthaei_mimat_s_y.bed', delim = '\t', col_names = c("seqnames", "start", "end", "gene_id","gene_name", "strand","type", "gene_type", "seqnames_mir", "start_mir", "end_mir", "gene_id_mir","gene_name_mir", "strand_mir", "mimat_Alias", "mimat_ID", "Derives_from",   "uniq_pos")) %>% filter(type == 'gene', gene_type == 'protein_coding')
+```
+
+### All our host genes in CPM corrs
+
+```{r get_cpm_our, echo=T}
+cpm.symbol <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/illumina/Fuchs_transcriptomes/analysis/transcript_analysis/RDS/expression/cpm.symbol_list.RDS")
+cpm.symbol <- cpm.symbol[[1]] %>% dplyr::select(-c('C_209', 'C_210', 'C_211','Dfu_209', 'Dfu_223', 'Dfu_210'))
+
+grep("MIR", rownames(cpm.symbol), value = TRUE)
+cpm.symbol_hg <- cpm.symbol
+cpm.symbol_hg <- cpm.symbol_hg[grep("MIR", rownames(cpm.symbol_hg)) ,]
+# похожа ли mir с её HG? - Да, remove it
+cor(as.numeric(cpm.symbol_hg['MIR663A', ]), as.numeric(cpm.symbol_hg['MIR663AHG', ]))
+cpm.symbol_hg <- cpm.symbol_hg[rownames(cpm.symbol_hg) != "MIR663A", , drop = F]
+
+rownames(cpm.symbol_hg) <- str_remove(rownames(cpm.symbol_hg), "HG")
+```
+
+What are the Host Genes on matthaei degs mRNA in our CPMs?
+
+```{r hg_in_matth}
+intersect(matthaei_degs$HGNC_name, rownames(cpm.symbol_hg))
+```
+
+```{r, echo=F}
+# add rnaseq expression counts 
+for_plot <- cpm.symbol_hg %>%
+  rownames_to_column("gene") %>% 
+  pivot_longer(cols = -gene, names_to = "Sample_name", values_to = "gene_expression") 
+
+# add miRNA counts с аннотацией
+for_merge <- norm_data_cleaned %>%
+  rownames_to_column("miRNA") %>%  
+  pivot_longer(cols = -miRNA, names_to = "Sample_name", values_to = "mirna_expression") %>% 
+  left_join(chip_mimat %>% select(miRNA, HGNC_name), by = 'miRNA')
+
+for_plot <- left_join(for_merge, for_plot, by = c('HGNC_name' = 'gene', 'Sample_name' = 'Sample_name')) %>% na.omit() %>% 
+  mutate(log_mirna_expression = log2(mirna_expression),
+         log_gene_expression = gene_expression,
+         gene_expression = 2^gene_expression) #de-log
+```
+
+Plot of all intersecting miRNAs (not just DEGs) in the Nanostring chip and their host gene from CPM with lm line and spearman correlation
+
+log CPM vs de-log miRNA counts
+
+```{r, echo=F, fig.height=6, fig.width=9}
+cor_data <- for_plot %>%
+  filter(str_detect(Sample_name, "C")) %>% group_by(miRNA) %>%
+  summarise(
+    cor = cor(gene_expression, mirna_expression, method = "spearman"),
+    cor_label = paste0("r = ", round(cor, 2))) %>% 
+    mutate(x_pos = -Inf,  y_pos = Inf)
+
+ggplot(for_plot %>%  filter(str_detect(Sample_name, "C")), aes(x=log_gene_expression, y=mirna_expression)) + geom_point() +   labs(title="Control: de-log miRNA from array and miRNA's Host Genes log2 CPM genes expression") + facet_wrap(~miRNA, scales = 'free') +
+  geom_smooth(method = "lm", se = F, color = "blue", linewidth=0.5, linetype='dashed') +
+  geom_text(data = cor_data, 
+    aes(x = x_pos, y = y_pos, label = cor_label),
+    color = "blue", size = 3, hjust = -0.3, vjust = 1.4)
+
+# fecd
+cor_data <- for_plot %>%
+  filter(str_detect(Sample_name, "D")) %>% group_by(miRNA) %>%
+  summarise(
+    cor = cor(gene_expression, mirna_expression, method = "spearman"),
+    cor_label = paste0("r = ", round(cor, 2))) %>% 
+    mutate(x_pos = -Inf,  y_pos = Inf)
+
+ggplot(for_plot %>%  filter(str_detect(Sample_name, "D")), aes(x=log_gene_expression, y= mirna_expression)) + geom_point() +   labs(title="FECD: de-log miRNA from array and miRNA's Host Genes log CPM genes expression") + facet_wrap(~miRNA, scales = 'free') +
+  geom_smooth(method = "lm", se = F, color = "blue", linewidth=0.5, linetype='dashed') +
+  geom_text(data = cor_data, 
+    aes(x = x_pos, y = y_pos, label = cor_label),
+    color = "blue", size = 3, hjust = -0.3, vjust = 1.4)
+```
+
+### all our mirtrones
+
+```{r forplot_corrs_allmirtrones, echo=F}
+
+# add cpm expressiob
+for_plot <- cpm.symbol %>%
+  rownames_to_column("gene") %>% 
+  pivot_longer(cols = -gene, names_to = "Sample_name", values_to = "gene_expression") 
+
+# add miRNA counts
+for_merge <- norm_data_cleaned %>%
+  rownames_to_column("miRNA") %>%  
+  pivot_longer(cols = -miRNA, names_to = "Sample_name", values_to = "mirna_expression") %>% 
+  left_join(mirtrones_mimat %>% select(gene_name, gene_id_mir, type_mir, Alias, ID), by = c('miRNA' = 'gene_id_mir'))
+
+for_plot <- left_join(for_merge, for_plot, by = c('gene_name' = 'gene', 'Sample_name' = 'Sample_name')) %>% na.omit() %>% 
+  mutate(log_mirna_expression = log2(mirna_expression),
+         log_gene_expression = gene_expression,
+         gene_expression = 2^gene_expression) %>% rename(in_gene = gene_name) %>% #de-log 
+  mutate(MIR_gene = str_glue("{miRNA}\n({in_gene})"))
+```
+
+### Our DEGs mirtrones expression corr
+
+Let's build the same thing, but using our DEGs and their mirtrons, not all host genes. LogFC order is (-inf, +inf).
+
+```{r deg_mirtr_cor, echo=F, fig.height=10, fig.width=12}
+# subset degs, order
+for_plot <- for_plot %>% filter(miRNA %in% diffexpressed_mirna$miRNA) %>% 
+  left_join( diffexpressed_mirna %>% select(miRNA, logFC), by='miRNA') %>% 
+  mutate(logFC_direction = ifelse(logFC > 0, "Upregulated", "Downregulated"))
+
+
+# check same mirnas in multi genes
+mir_dups <- for_plot %>% group_by(miRNA) %>%  summarise(
+    unique_gene_count = n_distinct(in_gene))  %>%
+  filter(unique_gene_count > 1)  %>% pull(miRNA) #%T>% 
+  #{DT::datatable(., caption = "MIR found in multiple genes") %>% print()}  %>% pull(miRNA) 
+
+
+facet_order <- for_plot %>% distinct(MIR_gene, logFC) %>% arrange((logFC)) %>% pull(MIR_gene)
+
+for_plot <- for_plot %>%  mutate(MIR_gene = factor(MIR_gene, levels = facet_order)) # for order
+
+#control
+for_plot_long <- for_plot %>%  filter(str_detect(Sample_name, "C"))
+cor_data <- for_plot_long %>% group_by(MIR_gene) %>%
+  summarise(
+    cor = cor(gene_expression, mirna_expression, method = "spearman"),
+    cor_label = paste0("r = ", round(cor, 2))) %>% 
+    mutate(x_pos = -Inf,  y_pos = Inf)
+
+ggplot(for_plot_long, aes(x=gene_expression, y= mirna_expression, color = logFC_direction )) + 
+  geom_point() + 
+  labs(title="Control: our DEG miRNA and its mirtrones CPM expression (de-log)") + facet_wrap(~MIR_gene, scales = 'free') +
+  geom_smooth(method = "lm", se = F, color = "blue", linewidth=0.5, linetype='dashed') +
+  geom_text(data = cor_data, 
+    aes(x = x_pos, y = y_pos, label = cor_label),
+    color = "blue", size = 3, hjust = -0.3, vjust = 1.4) 
+
+# fecd
+for_plot_long <- for_plot %>%  filter(str_detect(Sample_name, "D"))
+cor_data <- for_plot_long %>% group_by(MIR_gene) %>%
+  summarise(
+    cor = cor(gene_expression, mirna_expression, method = "spearman"),
+    cor_label = paste0("r = ", round(cor, 2))) %>% 
+    mutate(x_pos = -Inf,  y_pos = Inf)
+
+ggplot(for_plot_long, aes(x=gene_expression, y= mirna_expression, color = logFC_direction)) + 
+  geom_point() +
+  labs(title="FECD: our DEG miRNA and its mirtrones CPM expression (de-log)") + facet_wrap(~MIR_gene, scales = 'free') +
+  geom_smooth(method = "lm", se = F, color = "blue", linewidth=0.5, linetype='dashed') +
+  geom_text(data = cor_data, 
+    aes(x = x_pos, y = y_pos, label = cor_label),
+    color = "blue", size = 3, hjust = -0.3, vjust = 1.4) 
+```
+
+Let's make a cropped chart with correlations for the article \~ 8x8.
+
+```{r fig.height=7, fig.width=7}
+# title="FECD: our DEG miRNA and its mirtrones CPM expression (de-log)"
+
+selected_groups <- for_plot_long %>%
+  group_by(MIR_gene) %>%
+  summarise(mean_logFC = mean(logFC, na.rm = TRUE)) %>%
+  arrange(desc(mean_logFC)) %>%
+  {bind_rows(slice_head(., n = 8), slice_tail(., n = 8))} %>%
+  pull(MIR_gene) %>% as.character()
+
+for_plot_long2 <- for_plot_long %>% filter(MIR_gene %in% selected_groups)
+
+
+ggplot(for_plot_long2, aes(x=gene_expression, y= mirna_expression, color = logFC_direction)) + 
+  geom_point() +
+  facet_wrap(~MIR_gene, scales = 'free') +
+  geom_smooth(method = "lm", se = F, color = "blue", linewidth=0.5, linetype='dashed') +
+  geom_text(data = cor_data %>% filter(MIR_gene %in% for_plot_long2$MIR_gene), 
+    aes(x = x_pos, y = y_pos, label = cor_label),
+    color = "blue", size = 3, hjust = -0.3, vjust = 1.4) +
+  
+  labs(y='miRNA expression in normalized counts', x='Gene expression in CPM',
+       color = "DE miRNA") + 
+  theme(legend.position = "bottom",
+       legend.box = "horizontal")
+```
+
+Correlations Fecd, Control on same plot
+
+```{r fig.height=12, fig.width=14}
+
+for_plot_long <- for_plot %>%
+  mutate(group = if_else(str_detect(Sample_name, "C"), "Control", "FECD"))
+
+cor_data <- for_plot_long %>%
+  group_by(MIR_gene, group) %>%
+  summarise(
+    cor = cor(gene_expression, mirna_expression, method = "spearman"),
+    cor_label = paste0("r = ", round(cor, 2)),
+    .groups = 'drop'
+  ) %>%
+  mutate(x_pos = -Inf,  y_pos = Inf)
+
+
+ggplot(for_plot_long, aes(x = gene_expression, y = mirna_expression)) + 
+  geom_point(aes(color = group, shape = logFC_direction), 
+             size = 3, alpha = 0.7) + 
+  
+  geom_smooth(aes(color = group, linetype = group), 
+              method = "lm", se = FALSE, linewidth = 0.8) +
+  
+  # Подписи корреляций
+  geom_text(data = cor_data, 
+            aes(x = x_pos, y = y_pos, label = cor_label, color = group),
+            hjust = -0.1, vjust = 1.5, size = 3.5, show.legend = FALSE) +
+  
+  scale_color_manual(values = c("Control" = "#1f77b4", "FECD" = "#ff7f0e")) +
+  scale_shape_manual(values = c("Upregulated" = 16, "Downregulated" = 17)) +
+  scale_linetype_manual(values = c("Control" = "dashed", "FECD" = "dashed")) +
+  
+  labs(
+    title = "miRNA vs Gene Expression Correlation",
+    subtitle = "Control (blue) vs FECD (orange) groups",
+    x = "Gene Expression (CPM)",
+    y = "miRNA Expression",
+    color = "Group",
+    shape = "LogFC Direction",
+    linetype = "Group"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 9),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    panel.grid.minor = element_blank()
+  ) +
+  guides(
+    color = guide_legend(order = 1),
+    shape = guide_legend(order = 2),
+    linetype = guide_legend(order = 1)) +
+	  facet_wrap(~ MIR_gene, scales = 'free') 
+```
+
+Также построим бокспоты по каждой миРНК с экспрессией семплов в чипе и CPM в лог и не лог.
+
+```{r box_mircpm_control, echo=F, eval=F}
+for_plot_long <- for_plot %>%
+  pivot_longer(
+    cols = c(log_gene_expression, log_mirna_expression),
+    names_to = "expression_type",
+    values_to = "log_value_expression"
+  ) %>%
+  mutate(expression_type = factor(
+    expression_type,
+    levels = c("log_gene_expression", "log_mirna_expression"),
+    labels = c("Gene Expression", "miRNA Expression")
+  ))
+
+
+ggplot(for_plot_long %>%  filter(str_detect(Sample_name, "C")), aes(x = expression_type, y = log_value_expression, fill = expression_type)) + geom_boxplot() +   
+  geom_jitter(position=position_jitter(0.3), size = 0.5) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D")) +
+  labs(title="Control: log miRNA from array and miRNA's CPM genes expression", x='') +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 12, hjust = 0.5),
+        strip.text = element_text(size = 6)) +
+  facet_wrap(~miRNA, scales = "free")
+
+for_plot_long <- for_plot %>%
+  pivot_longer(
+    cols = c(gene_expression, mirna_expression),
+    names_to = "expression_type",
+    values_to = "value_expression"
+  ) %>%
+  mutate(expression_type = factor(
+    expression_type,
+    levels = c("gene_expression", "mirna_expression"),
+    labels = c("Gene Expression", "miRNA Expression")
+  ))
+
+
+ggplot(for_plot_long %>%  filter(str_detect(Sample_name, "C")), aes(x = expression_type, y = value_expression, fill = expression_type)) + geom_boxplot() +   
+  geom_jitter(position=position_jitter(0.3), size = 0.5) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D")) +
+  labs(title="Control: miRNA from array and miRNA's CPM genes expression", x='') +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 12, hjust = 0.5),
+        strip.text = element_text(size = 6)) + # name on tile
+  facet_wrap(~miRNA, scales = "free")
+```
+
+Теперь по Fecd
+
+```{r box_mircpm_fecd, echo=F, eval=F}
+for_plot_long <- for_plot %>%
+  pivot_longer(
+    cols = c(log_gene_expression, log_mirna_expression),
+    names_to = "expression_type",
+    values_to = "log_value_expression"
+  ) %>%
+  mutate(expression_type = factor(
+    expression_type,
+    levels = c("log_gene_expression", "log_mirna_expression"),
+    labels = c("Gene Expression", "miRNA Expression")
+  ))
+
+
+ggplot(for_plot_long %>%  filter(str_detect(Sample_name, "D")), aes(x = expression_type, y = log_value_expression, fill = expression_type)) + geom_boxplot() +   
+  geom_jitter(position=position_jitter(0.3), size = 0.5) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D")) +
+  labs(title="FECD: log miRNA from array and miRNA's CPM genes expression", x='') +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 12, hjust = 0.5),
+        strip.text = element_text(size = 6)) +
+  facet_wrap(~miRNA, scales = "free")
+
+for_plot_long <- for_plot %>%
+  pivot_longer(
+    cols = c(gene_expression, mirna_expression),
+    names_to = "expression_type",
+    values_to = "value_expression"
+  ) %>%
+  mutate(expression_type = factor(
+    expression_type,
+    levels = c("gene_expression", "mirna_expression"),
+    labels = c("Gene Expression", "miRNA Expression")
+  ))
+
+
+ggplot(for_plot_long %>%  filter(str_detect(Sample_name, "D")), aes(x = expression_type, y = value_expression, fill = expression_type)) + geom_boxplot() +   
+  geom_jitter(position=position_jitter(0.3), size = 0.5) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D")) +
+  labs(title="FECD: miRNA from array and miRNA's CPM genes expression", x='') +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 12, hjust = 0.5),
+        strip.text = element_text(size = 6)) + # name on tile
+  facet_wrap(~miRNA, scales = "free")
+```
+
+## CPM Boxplots for DEGs: our, nar
+
+We need to build boxes only for DEGs: separately for our up and down and for the Nar set. For each up: our Fecd, Control; Nar's Fecd, Control, for a total of 4 boxes.
+
+> Для наши х ап и даун отдельно бокс плот наш fexd, наш контрол, нар фекд, нар контроль прекурсора
+
+```{r get_cpm_nar, echo=T}
+nar <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/illumina/Fuchs_transcriptomes/analysis/transcript_analysis/RDS/expression/cpm.symbol_list.RDS")
+nar <- nar[[3]] 
+
+grep("MIR", rownames(nar), value = TRUE)
+nar <- nar[grep("MIR", rownames(nar)) ,]
+# похожа ли mir с её HG? - Да, remove it
+cor(as.numeric(nar['MIR663A', ]), as.numeric(nar['MIR663AHG', ]))
+nar_hg <- nar[rownames(nar) != "MIR663A", , drop = F]
+
+# оставим для добавление 2х мирнк генов
+rownames(nar_hg) <- str_remove(rownames(nar_hg), "HG")
+```
+
+Not all host genes are in CPM, but many miRNAs don't have their own gene because they are mirtrones, meaning their host gene is some protein-coding gene. I previously intersected them with bedtools, so now let's try using these genes. Let's add a strand-specific bed with such intersections: `annot_chipdf_genes_s_y.bed`. There's a transcript level there, and it would be better to select its sum as gene expression values, but this is probably fine.
+
+Конечно мы потеряем -5P/3P, тк будем вытягивать по HGNC названию
+
+```{r again_cpm, echo=F}
+nar <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/illumina/Fuchs_transcriptomes/analysis/transcript_analysis/RDS/expression/cpm.symbol_list.RDS") [[3]] %>% select(-FECD_NREP3 )
+cpm.symbol <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/illumina/Fuchs_transcriptomes/analysis/transcript_analysis/RDS/expression/cpm.symbol_list.RDS")
+cpm.symbol <- cpm.symbol[[1]] %>% select(-c('C_209', 'C_210', 'Dfu_210', 'C_211','Dfu_209', 'Dfu_223'))
+cpm.symbol <- 2^cpm.symbol
+nar <- 2^nar
+```
+
+те 2 найденные в спм плотить отдельно или как-либо встроить сюда? Те 2 ДЭГ мирнки, на которых есть host gene в полученной таблице отсутствуют. сначала к ней подтянуть, а потом к остальным миртроны. добавил вручную их HG
+
+попробуем сразу сделать cpm с нужными генами
+
+```{r our_nar_mirtrones_deg_hgnc, eval=F}
+# colors for box
+my_colors <- c("nar control" = "#338050", "nar fecd" = "#A83232", "our control" = "#78C679", "our fecd" = "#FF6B6B")
+
+# all mirtrones
+for_plot <- diffexpressed_mirna_HGNC %>% 
+  left_join(
+    mirtrones %>% select(gene_name, gene_name_mir), by = c('HGNC_symbol' = 'gene_name_mir')) %>% 
+  #filter(!is.na(gene_name)) %>% 
+  rename(in_gene = gene_name) %>% 
+  mutate(
+    in_gene = case_when(
+      HGNC_symbol == "MIR1915" ~ "MIR1915HG", 
+      HGNC_symbol =="MIR30D" ~ "MIR30DHG", 
+      TRUE ~ in_gene)) %>% 
+  left_join(nar %>% rownames_to_column('in_gene'), by='in_gene') %>% 
+  left_join(cpm.symbol %>% rownames_to_column('in_gene'), by='in_gene') %>% 
+  left_join(diffexpressed_mirna %>% select(miRNA, logFC), by='miRNA') %>% 
+  filter(!is.na(in_gene)) %>% filter(!is.na(Ctrl0)) %>%  # убрать которых нет в спм 
+  mutate(MIR_gene = str_glue("{miRNA}\n({in_gene})"))
+
+```
+
+Пересечём с mimat миртронами. плохо, что я не добавил оба mimat id когда пересекал.
+
+Есть ли среди наших ДЭГов разные миРНК, которые лежат внутри одинакового гена -- есть 1 миРНК, с разным суффиксом -5р\\3р. Есть ли миРНК, которые лежат внутри нескольких генов?
+
+```{r our_nar_mirtrones_deg_mimat}
+
+for_plot <- diffexpressed_mirna_HGNC %>% 
+  left_join(
+    mirtrones_mimat %>% select(gene_name, gene_id_mir, seqnames), by = c('miRNA' = 'gene_id_mir')) %>% 
+  #filter(!is.na(gene_name)) %>% 
+  rename(in_gene = gene_name) %>% 
+  mutate(
+    in_gene = case_when(
+      HGNC_symbol == "MIR1915" ~ "MIR1915HG", 
+      HGNC_symbol =="MIR30D" ~ "MIR30DHG", 
+      TRUE ~ in_gene)) %>% 
+  left_join(nar %>% rownames_to_column('in_gene'), by='in_gene') %>% 
+  left_join(cpm.symbol %>% rownames_to_column('in_gene'), by='in_gene') %>% 
+  left_join(diffexpressed_mirna %>% select(miRNA, logFC), by='miRNA') %>% 
+  filter(!is.na(in_gene)) %>% filter(!is.na(Ctrl0)) %>%  # убрать которых нет в спм 
+  mutate(MIR_gene = str_glue("{miRNA}\n({in_gene})"))
+
+
+# same genes
+for_plot %>% group_by(in_gene) %>% summarise(
+    unique_mirna_count = n_distinct(miRNA))  %>%
+  filter(unique_mirna_count > 1) #%>% DT::datatable(caption = "Mirtrone genes with multiple miRNA in them")
+
+for_plot %>% group_by(miRNA) %>% summarise(
+    unique_mirna_count = n_distinct(in_gene))  %>%
+  filter(unique_mirna_count > 1) #%>% DT::datatable(caption = "MIR found in multiple genes")
+
+
+# rm 
+for_plot <- for_plot %>% filter(!(miRNA %in% c('hsa-miR-103a-3p', 'hsa-miR-1285-5p')))
+```
+
+**Разделим по значению logFC:**
+
+-   UP -- В Fecd её больше, чем в Control
+
+-   DOWN - в Control больше чем в Fecd
+
+-   Следовательно host genes миртронов должны обладать той же зависимостью
+
+Поменять шкалу free на фикс
+
+```{r boxplot_our_nar_down, echo = F, fig.width=12, fig.height=8}
+# colors for box
+my_colors <- c("nar control" = "#338050", "nar fecd" = "#A83232", "our control" = "#78C679", "our fecd" = "#FF6B6B")
+
+facet_order <- for_plot %>% distinct(MIR_gene, logFC) %>% 
+  arrange((logFC)) %>% pull(MIR_gene)
+
+for_plot_long <- for_plot %>% filter(logFC < 0) %>%
+  mutate(MIR_gene = factor(MIR_gene, levels = facet_order)) %>% # for order
+  pivot_longer(
+    cols = -c(miRNA, HGNC_symbol, strand, MIMAT_ID, in_gene, logFC, MIR_gene,seqnames),
+    names_to = "sample_group", values_to = "expression") %>%
+  
+  mutate(
+    data_type = case_when(
+      grepl("^Ctrl|^FECD", sample_group) ~ "nar",
+      grepl("^C_|^Dfu", sample_group) ~ "our",
+      TRUE ~ NA_character_),
+    group = case_when(
+      grepl("^Ctrl|^C_", sample_group) ~ "control",
+      grepl("^FECD|^Dfu", sample_group) ~ "fecd",
+      TRUE ~ NA_character_)) %>%
+  mutate(full_group = paste(data_type, group)) 
+
+
+
+# rm omit%>% na.omit()
+ggplot(for_plot_long , aes(x = full_group, y = expression, fill = full_group)) +
+  geom_boxplot() +
+  geom_jitter(position=position_jitter(0.3), size= 0.1) +
+  facet_wrap(~ MIR_gene, scales = 'free') +
+  labs(
+    title = "Downreg DEG mirna by mirtrones genes expression (FC: -inf -> 0)",
+    y = "Expression Level") +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 30, hjust = 0.5),
+        strip.text = element_text(size = 16)) +
+  scale_fill_manual(values = my_colors)
+
+```
+
+Up. (сделать тут от inf до 0)
+
+```{r boxplot_our_nar_up, echo = F, fig.width=14, fig.height=9}
+
+facet_order <- for_plot %>% distinct(MIR_gene, logFC) %>% 
+  arrange(desc(logFC)) %>% pull(MIR_gene)
+
+for_plot_long <- for_plot %>% filter(logFC > 0) %>%
+  mutate(MIR_gene = factor(MIR_gene, levels = facet_order)) %>% # for order
+  pivot_longer(
+    cols = -c(miRNA, HGNC_symbol, strand, MIMAT_ID, in_gene, logFC, MIR_gene,seqnames),
+    names_to = "sample_group",
+    values_to = "expression") %>%
+  mutate(
+    data_type = case_when(
+      grepl("^Ctrl|^FECD", sample_group) ~ "nar",
+      grepl("^C_|^Dfu", sample_group) ~ "our",
+      TRUE ~ NA_character_),
+    group = case_when(
+      grepl("^Ctrl|^C_", sample_group) ~ "control",
+      grepl("^FECD|^Dfu", sample_group) ~ "fecd",
+      TRUE ~ NA_character_)) %>%
+  mutate(full_group = paste(data_type, group)) 
+
+ggplot(for_plot_long  , aes(x = full_group, y = expression, fill = full_group)) +
+  geom_boxplot() +
+  geom_jitter(position=position_jitter(0.3), size= 0.1) +
+  scale_fill_manual(values = my_colors) +
+  facet_wrap(~ MIR_gene, scales = 'free') +
+  labs(
+    title = "Upreg DEG mirna by host genes expression (FC: inf->0 )",
+    y = "Expression Level") +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 30, hjust = 0.5),
+        strip.text = element_text(size = 11)) 
+```
+
+сделаем все для статьи на 1 картинке снова 8х8
+
+```{r boxplot_our_nar_all, echo = F, fig.width=10, fig.height=9}
+
+my_colors <- c("Chu et al. Control" = "#338050", "Chu et al. FECD" = "#A83232", "Nikitina et al. Control" = "#78C679", "Nikitina et al. FECD" = "#FF6B6B")
+
+for_plot_long <- for_plot %>%
+  arrange(desc(logFC)) %>%
+  {bind_rows(slice_head(., n = 8), slice_tail(., n = 8))} #%>%
+  #pull(MIR_gene) %>% as.character()
+
+facet_order <- for_plot_long %>% distinct(MIR_gene, logFC) %>% 
+  arrange((logFC)) %>% pull(MIR_gene)
+
+for_plot_long <- for_plot_long %>%
+  mutate(MIR_gene = factor(MIR_gene, levels = facet_order)) %>% # for order
+  pivot_longer(
+    cols = -c(miRNA, HGNC_symbol, strand, MIMAT_ID, in_gene, logFC, MIR_gene,seqnames),
+    names_to = "sample_group",
+    values_to = "expression") %>%
+  mutate(
+    data_type = case_when(
+      grepl("^Ctrl|^FECD", sample_group) ~ "Chu et al.",
+      grepl("^C_|^Dfu", sample_group) ~ "Nikitina et al.",
+      TRUE ~ NA_character_),
+    group = case_when(
+      grepl("^Ctrl|^C_", sample_group) ~ "Control",
+      grepl("^FECD|^Dfu", sample_group) ~ "FECD",
+      TRUE ~ NA_character_)) %>%
+  mutate(Dataset = paste(data_type, group)) 
+
+ggplot(for_plot_long, aes(x = Dataset, y = expression, fill = Dataset)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(position=position_jitter(0.3), size= 0.1) +
+  scale_fill_manual(values = my_colors) +
+  facet_wrap(~ MIR_gene, scales = 'free') +
+  labs(
+    y = "Gene expression in CPM", x='') +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        plot.title = element_text(size = 30, hjust = 0.5),
+        strip.text = element_text(size = 13), 
+        legend.position = "bottom", 
+        legend.text=element_text(size=13),
+        legend.title=element_text(size=14),
+    legend.box = "horizontal",    #panel.grid.minor = element_blank()
+  ) 
+```
+
+```{r}
+for_plot_long <- for_plot_long %>%
+  mutate(
+    GroupSet = ifelse(MIR_gene %in% head(facet_order, 8), "Bottom 8", "Top 8")
+  )
+
+ggplot(for_plot_long, aes(x = Dataset, y = expression, fill = Dataset)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(position = position_jitter(0.3), size = 0.1) +
+  scale_fill_manual(values = my_colors) +
+  facet_grid(GroupSet ~ MIR_gene, scales = "free", space = "free_x") +
+  labs(y = "Gene expression in CPM", x='') +
+  theme(
+    axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(size = 30, hjust = 0.5),
+    strip.text = element_text(size = 13), 
+    legend.position = "bottom", 
+    legend.text=element_text(size=13),
+    legend.title=element_text(size=14),
+    legend.box = "horizontal"
+  )
+
+```
+
+# Проверим FC дэгов наши и из статьи на CPM сетах {.tabset}
+
+Сравниваем FC их DEG мирнк с экспрессией их миртрон-генов (которые я получил пересечением bed) в обоих датасетах: nar, our. Так мы сможем понять, насколько их Fold Change коррелируют с нашими данными. То же самое потом и на наших DEG.
+
+Добавим к названиям генов из статьи экспрессию их генов. Сначала я добавлял из пересечения нашей таблицы против аннотации без миРНК, потом я отдельно пересёк с ней миРНК гены из статьи, получились те же гены, хотя в пересечении с аннотацией было всего 80/120 вхождений.
+
+```{r matt_logs_fc_all, echo=F}
+logfc_our <- log2(
+  cpm.symbol %>% select(starts_with("Dfu_")) %>% rowMeans() / cpm.symbol %>% select(starts_with("C_")) %>% rowMeans()) %>% as.data.frame() %>% setNames("our_logFC") %>% rownames_to_column('gene') #%>% mutate(rank =rank(our_logFC)) 
+
+logfc_nar <- log2(
+  nar %>% select(starts_with("FECD")) %>% rowMeans() / nar %>% select(starts_with("Ctrl"))  %>% rowMeans()) %>% as.data.frame() %>% setNames("nar_logFC") %>% rownames_to_column('gene') #%>% mutate(rank = rank(nar_logFC)) 
+
+
+for_plot <- matthaei_degs %>% 
+  left_join(mirtrones_matthaei %>% select(gene_name, gene_id_mir), by=c('miRNA' = 'gene_id_mir'))  %>% 
+  rename(in_gene = gene_name) %>% 
+  left_join(logfc_our, by=c('in_gene' = 'gene')) %>% 
+  left_join(logfc_nar, by=c('in_gene' = 'gene')) %>%  filter(!is.na(in_gene)) 
+
+
+
+# check same genes
+for_plot %>% group_by(in_gene) %>%    summarise(
+    unique_mirna_count = n_distinct(miRNA))  %>%
+  filter(unique_mirna_count > 1) #%>% DT::datatable(caption = "Mirtrone genes with multiple miRNA in them")
+
+
+
+# check same mirnas
+mir_dups <- for_plot %>% group_by(miRNA) %>%  summarise(
+    unique_gene_count = n_distinct(in_gene))  %>%
+  filter(unique_gene_count > 1) %>% pull(miRNA) #%T>% {
+  #	DT::datatable(., caption = "MIR found in multiple genes") %>% print()}  %>% pull(miRNA) 
+
+# MIR
+
+# квантили fc повторяющихся мирнк
+values <- c(-6.54, -4.33, 7.65)
+sapply(values, function(x) mean(matthaei_degs$FoldChange <= x)) * 100
+
+
+# rm and arange
+for_plot <- for_plot %>% 
+  filter( 
+    !(miRNA %in% mir_dups),
+    !(is.na(our_logFC) & is.na(nar_logFC))) %>% 
+  arrange(logFC) %>% 
+  rownames_to_column('fc_rank') %>% 
+  mutate(fc_rank = as.numeric(fc_rank))
+```
+
+Сложность:
+
+-   В миртронах matthaei есть много миРНК на 1 ген. По-хорошему тут нужно считать CPM на уровень транскриптов, но думаю будет ок если мы посчитаем их с равной экспр.
+
+-   Также есть миРНК, сидящая в нескольких генах, ака местах генома, что с ней делать? -- Думаю просто выбросить, тк мы не сможем однозначно соопоставить её с несколькими генами.
+
+## Matthaei DEGS {.tabset}
+
+### mat mirtrones
+
+Из-за повторяющихся хостов для нескольких миРНК факторные ранги неверные, нужно сделать численно.
+
+```{r, fig.width=17, fig.height=8, echo=F}
+# get orders
+
+first_positive_gene <- for_plot %>%  arrange(logFC) %>% filter(logFC >= 0) %>%  slice(1) %>%  pull(fc_rank) - 0.5
+
+for_plot_long <- for_plot %>%
+  select(miRNA, in_gene, our_logFC, logFC, nar_logFC, fc_rank) %>%
+  pivot_longer(
+    cols = c(our_logFC, logFC, nar_logFC),
+    names_to = "dataset",
+    values_to = "logFC") %>%
+  mutate(dataset = factor(dataset,
+                          levels = c("our_logFC", "logFC", "nar_logFC"),
+                          labels = c("Our Data", "Mat Data", "Nar Data"))) %>% 
+  filter(dataset %in% c('Nar Data','Our Data'))
+#%>% 
+ # mutate(in_gene = factor(in_gene, levels = ordered_levels))
+
+ggplot(for_plot_long , aes(x = fc_rank, y = logFC, fill = dataset)) +
+ geom_col(position = position_dodge(width = 0.8), width = 0.7) + 
+  theme(axis.text.x = element_text(angle = 90, size = 9), axis.text.y = element_blank()) +
+  geom_vline(xintercept = first_positive_gene, linetype = "dashed", color = "red") +
+  scale_x_continuous(
+    breaks = for_plot_long$fc_rank,
+    labels = for_plot_long$in_gene,
+    expand = c(0.02, 0.02) )+
+  labs(title = 'matthaei degs with mirtrones, ordered by logFC', x= "Mirtrone host genes ordered by fold change", y="Log2FC")  + 
+scale_fill_manual(
+    name = "Dataset", values = c("Our Data" = "#1f77b4", "Nar Data" = "#ff7f0e"), 
+    labels = c("Our Data" = "Nikitina et al.", "Nar Data" = "Chu et al.") )
+```
+
+пресекающиеся ДЭГи у нас и у Matth
+
+```{r}
+
+
+for_plot_long <- for_plot %>% filter(miRNA %in% diffexpressed_mirna$miRNA) %>% 
+  arrange(logFC) %>% 
+  rownames_to_column('fc_rank2') %>% 
+  mutate(fc_rank2 = as.numeric(fc_rank2)) %>% 
+  select(miRNA, in_gene, our_logFC, logFC, nar_logFC, fc_rank2) %>%
+  
+  pivot_longer(
+    cols = c(our_logFC, logFC, nar_logFC),
+    names_to = "dataset",
+    values_to = "logFC") %>%
+  mutate(dataset = factor(dataset,
+                          levels = c("our_logFC", "logFC", "nar_logFC"),
+                          labels = c("Our Data", "Mat Data", "Nar Data"))) %>% 
+  filter(dataset %in% c('Nar Data','Our Data'))
+
+first_positive_gene <- 6.5
+
+ggplot(for_plot_long, aes(x = fc_rank2, y = logFC, fill = dataset)) +
+ geom_col(position = position_dodge(width = 0.8), width = 0.7) + 
+  theme(axis.text.x = element_text(angle = 90, size = 15)) +
+  geom_vline(xintercept = first_positive_gene, linetype = "dashed", color = "red") +
+  scale_x_continuous(
+    breaks = for_plot_long$fc_rank2,
+    labels = for_plot_long$in_gene,
+    expand = c(0.02, 0.02) )+
+  labs(title = 'intersected matthaei degs with mirtrones, ordered by logFC') +
+  scale_fill_manual(
+    name = "Dataset", values = c("Our Data" = "#1f77b4", "Nar Data" = "#ff7f0e"), 
+    labels = c("Our Data" = "Nikitina et al.", "Nar Data" = "Chu et al.") )
+```
+
+проверим по спм тоже самое, вдруг на наих логФС попадаются обравки генов, мелкие кусочки, нужно понять порядок спм каунтов, тк лфс нам этого не скажет
+
+```{r, fig.width=13, fig.height=7, echo=F}
+means_our <- cpm.symbol %>%
+  rownames_to_column("gene") %>%
+  mutate(our_mean_fecd = rowMeans(select(., starts_with("Dfu_"))),
+    our_mean_control = rowMeans(select(., starts_with("C_")))) %>%
+  select(gene, our_mean_fecd, our_mean_control)
+
+means_nar <- nar %>%
+  rownames_to_column("gene") %>%
+  mutate(nar_mean_fecd = rowMeans(select(., starts_with("FECD"))),
+    nar_mean_control = rowMeans(select(., starts_with("Ctrl")))) %>%
+  select(gene, nar_mean_fecd, nar_mean_control)
+
+for_plot <- matthaei_degs %>% 
+  left_join(mirtrones_matthaei %>% select(gene_name, gene_id_mir), by=c('miRNA' = 'gene_id_mir'))  %>% 
+  rename(in_gene = gene_name) %>% 
+  left_join(means_our, by=c('in_gene' = 'gene')) %>% 
+  left_join(means_nar, by=c('in_gene' = 'gene')) %>%  
+  na.omit() %>% arrange(logFC) %>% 
+  rownames_to_column('fc_rank') %>% 
+  mutate(fc_rank = as.numeric(fc_rank))
+
+first_positive_gene <- for_plot %>%  arrange(logFC) %>% filter(logFC >= 0) %>%  slice(1) %>%  pull(fc_rank) - 0.5
+
+
+for_plot_long <- for_plot %>%
+  select(miRNA, in_gene, logFC, nar_mean_control, nar_mean_fecd, our_mean_fecd, our_mean_control, fc_rank) %>%
+  pivot_longer(
+    cols = c(nar_mean_control, nar_mean_fecd, our_mean_fecd, our_mean_control),
+    names_to = "dataset",
+    values_to = "mean_cpm") %>%
+  mutate(dataset = factor(dataset,
+                          levels = c('nar_mean_control', 'nar_mean_fecd', 'our_mean_fecd', 'our_mean_control'),
+                          labels = c('nar_mean_control', 'nar_mean_fecd', 'our_mean_fecd', 'our_mean_control'))) 
+#%>% 
+ # mutate(in_gene = factor(in_gene, levels = ordered_levels))
+
+ggplot(for_plot_long, aes(x = fc_rank, y = mean_cpm, fill = dataset)) +
+ geom_col(position = position_dodge(width = 0.8), width = 0.7) + 
+  theme(axis.text.x = element_text(angle = 90, size = 10)) +
+  geom_vline(xintercept = first_positive_gene, linetype = "dashed", color = "red") +
+  scale_x_continuous(
+    breaks = for_plot_long$fc_rank,
+    labels = for_plot_long$in_gene,
+    expand = c(0.02, 0.02) )+
+  labs(title = "matthaei degs' CPMs with mirtrones, ordered by logFC") #+ theme_minimal()
+```
+
+### matt hg genes
+
+По HG, пересекающимся с matthe,обяз добавить перевал через 0 или подписать тупо.
+
+matthaei degs with Host genes, ordered by logFC
+
+```{r,  echo=F}
+# rm hg
+logfc_our$gene <- str_remove(logfc_our$gene, "HG")
+logfc_nar$gene <- str_remove(logfc_nar$gene, "HG")
+
+for_plot <- matthaei_degs %>% 
+  left_join(logfc_our, by=c('HGNC_name' = 'gene')) %>%  
+  left_join(logfc_nar, by=c('HGNC_name' = 'gene'))  %>% 
+  na.omit() %>% arrange(logFC) %>% 
+  rownames_to_column('fc_rank') %>% 
+  mutate(fc_rank = as.numeric(fc_rank))
+
+
+
+first_positive_gene <- for_plot %>%  arrange(logFC) %>% filter(logFC >= 0) %>%  slice(1) %>%  pull(fc_rank) - 0.5
+
+for_plot_long <- for_plot %>%
+  select(HGNC_name, our_logFC, logFC, nar_logFC, fc_rank) %>%
+  pivot_longer(
+    cols = c(our_logFC, logFC, nar_logFC),
+    names_to = "dataset",
+    values_to = "logFC") %>%
+  mutate(dataset = factor(dataset, 
+                         levels = c("our_logFC", "logFC", "nar_logFC"),
+                         labels = c("Our Data", "Mat Data", "Nar Data"))) %>% 
+  filter(dataset %in% c('Nar Data','Our Data'))
+
+
+ggplot(for_plot_long, aes(x = fc_rank, y = logFC, fill = dataset)) +
+ geom_col(position = position_dodge(width = 0.8), width = 0.7) + 
+  theme(axis.text.x = element_text(angle = 90, size = 12)) +
+  geom_vline(xintercept = first_positive_gene, linetype = "dashed", color = "gray50") +
+  scale_x_continuous(
+    breaks = for_plot_long$fc_rank,
+    labels = for_plot_long$HGNC_name,
+    expand = c(0.02, 0.02) ) +
+  labs(title = "matthaei degs with Host genes, ordered by logFC") + 
+  scale_fill_manual(
+    name = "Dataset", values = c("Our Data" = "#1f77b4", "Nar Data" = "#ff7f0e"), 
+    labels = c("Our Data" = "Nikitina et al.", "Nar Data" = "Chu et al.") )
+```
+
+и то же самое по нашим мирнк FC
+
+## Our signif degs mirtrones + HG genes
+
+сразу +2 HG. мб убрать забор, отсечь мелкий logFC. Тут сразу
+
+Построим такой же график по миртронам и HG генам для наших ДЭГ миРНК.
+
+```{r fig.width=11, fig.height=8, echo = F}
+
+logfc_nar$gene <- str_remove(logfc_nar$gene, "HG")
+logfc_our$gene <- str_remove(logfc_our$gene, "HG")
+
+# all deg mirtrones  + hg 
+for_plot <- diffexpressed_mirna %>%  
+  left_join(mirtrones_mimat %>% select(gene_name, gene_id_mir), by = c('miRNA' = 'gene_id_mir')) %>% 
+  #filter(!is.na(gene_name)) %>% 
+  rename(in_gene = gene_name) %>% 
+  mutate(
+    in_gene = case_when(
+      miRNA == "hsa-miR-1915-3p" ~ "MIR1915", 
+      miRNA =="hsa-miR-30d-5p" ~ "MIR30D", 
+      TRUE ~ in_gene)) %>% 
+  left_join(logfc_nar, by=c('in_gene' = 'gene')) %>% 
+  left_join(logfc_our, by=c('in_gene' = 'gene')) %>% filter(!is.na(in_gene)) %>% 
+  mutate(MIR_gene = str_glue("{miRNA} ({in_gene})")) %>% na.omit() %>% 
+  arrange(logFC) %>% 
+  rownames_to_column('fc_rank') %>% 
+  mutate(fc_rank = as.numeric(fc_rank))
+
+
+first_positive_gene <- for_plot %>%  arrange(logFC) %>% filter(logFC >= 0) %>%  slice(1) %>%  pull(fc_rank) - 0.5
+
+for_plot_long <- for_plot %>%
+  select(miRNA, in_gene, logFC, our_logFC, nar_logFC, fc_rank, MIR_gene) %>%
+    pivot_longer(
+    cols = c(our_logFC, logFC, nar_logFC),
+    names_to = "dataset",
+    values_to = "logFC") %>%
+  mutate(dataset = factor(dataset, 
+                         levels = c("our_logFC", "logFC", "nar_logFC"),
+                         labels = c("Our Data", "Mat Data", "Nar Data"))) %>% 
+  filter(dataset %in% c('Nar Data','Our Data'))
+
+#for_plot_long <- for_plot_long %>% filter(miRNA %in% cor_mir)
+
+ggplot(for_plot_long, 
+       aes(x = fc_rank, y = logFC, fill = dataset)) +
+ geom_col(position = position_dodge(width = 0.8), width = 0.7) + 
+  theme(axis.text.x = element_text(angle = 90)) +
+  geom_vline(xintercept = first_positive_gene, linetype = "dashed", color = "gray50") +
+  scale_x_continuous(
+    breaks = for_plot_long$fc_rank,
+    labels = for_plot_long$MIR_gene,
+    expand = c(0.02, 0.02) )+
+  labs(title = "our degs (p<0.05) with mirtrones and Host genes, ordered by logFC") + 
+  scale_fill_manual(
+    name = "Dataset", values = c("Our Data" = "#1f77b4", "Nar Data" = "#ff7f0e"), 
+    labels = c("Our Data" = "Nikitina et al.", "Nar Data" = "Chu et al.") )
+```
+
+проверим по спм тоже самое, вдруг на наих логФС попадаются обравки генов, мелкие кусочки, нужно понять порядок спм каунтов, тк лфс нам этого не скажет
+
+итог: гены родительские мирнк не смещены нив хай ни в даун
+
+```{r fig.width=11, fig.height=8, echo = F}
+
+means_our$gene <- str_remove(means_our$gene, "HG")
+means_nar$gene <- str_remove(means_nar$gene, "HG")
+
+# all mirtrones
+for_plot <- diffexpressed_mirna %>% 
+  left_join(mirtrones_mimat %>% select(gene_name, gene_id_mir), by = c('miRNA' = 'gene_id_mir')) %>% 
+  #filter(!is.na(gene_name)) %>% 
+  rename(in_gene = gene_name) %>% 
+  mutate(
+    in_gene = case_when(
+      miRNA == "hsa-miR-1915-3p" ~ "MIR1915", 
+      miRNA =="hsa-miR-30d-5p" ~ "MIR30D", 
+      TRUE ~ in_gene)) %>% 
+  left_join(means_our, by=c('in_gene' = 'gene')) %>% 
+  left_join(means_nar, by=c('in_gene' = 'gene')) %>% filter(!is.na(in_gene)) %>% 
+  mutate(MIR_gene = str_glue("{miRNA} ({in_gene})")) %>% na.omit() %>% arrange(logFC) %>% 
+  rownames_to_column('fc_rank') %>% 
+  mutate(fc_rank = as.numeric(fc_rank))
+
+
+first_positive_gene <- for_plot %>%  arrange(logFC) %>% filter(logFC >= 0) %>%  slice(1) %>%  pull(fc_rank) - 0.5
+
+for_plot_long <- for_plot %>%
+  select(miRNA, in_gene, logFC, nar_mean_control, nar_mean_fecd, our_mean_fecd, our_mean_control, fc_rank,MIR_gene) %>%
+  pivot_longer(
+    cols = c(nar_mean_control, nar_mean_fecd, our_mean_fecd, our_mean_control),
+    names_to = "dataset",
+    values_to = "mean_cpm") %>%
+mutate(dataset = factor(dataset,
+                          levels = c('nar_mean_control', 'nar_mean_fecd', 'our_mean_fecd', 'our_mean_control'),
+                          labels = c('nar_mean_control', 'nar_mean_fecd', 'our_mean_fecd', 'our_mean_control'))) 
+
+
+ggplot(for_plot_long, 
+       aes(x = fc_rank, y = mean_cpm, fill = dataset)) +
+ geom_col(position = position_dodge(width = 0.8), width = 0.7) + 
+  theme(axis.text.x = element_text(angle = 90)) +
+  geom_vline(xintercept = first_positive_gene, linetype = "dashed", color = "gray50") +
+  scale_x_continuous(
+    breaks = for_plot_long$fc_rank,
+    labels = for_plot_long$MIR_gene,
+    expand = c(0.02, 0.02) )+
+  labs(title = "our degs (p<0.05) with their mean CPM counts, ordered by logFC")
+```
+
+Вывод: не коррелируют с эксроессией чипа, сложности с определением похо
+
+```{r}
+for_plot %>% group_by(in_gene) %>%    summarise(
+    unique_mirna_count = n_distinct(miRNA))  %>%
+  filter(unique_mirna_count > 1)
+
+
+for_plot %>% group_by(in_gene) %>%    summarise(
+    unique_gene_count = n_distinct(in_gene))  %>%
+  filter(unique_gene_count > 1)
+```
+
+# Check -5P/3P array expression difference
+
+Проверим есть ли разница в экспрессии у миРНК у Control, Fecd, построим боксплоты по каждому.
+
+Видим, что у fecd большая часть положительно скоррелирована, а Control -50\\50.
+
+```{r contr_53p, echo=F, fig.width=11, fig.height=7}
+mirna_pairs <- norm_data_cleaned %>%
+  as.data.frame() %>%
+  rownames_to_column("miRNA") %>%
+  mutate(base_name = str_replace(miRNA, "-[35]p$", "")) %>%
+  group_by(base_name) %>%
+  filter(any(str_detect(miRNA, "-3p$")) & any(str_detect(miRNA, "-5p$"))) %>%
+  ungroup() %>% filter(str_detect(miRNA, "-[35]p$"))
+
+for_plot <- mirna_pairs %>%
+  pivot_longer(
+    cols = -c(miRNA, base_name),
+    names_to = "sample",
+    values_to = "expression") %>% 
+	mutate( Group = case_when(str_detect(sample, "C_") ~ 'Control',
+															str_detect(sample, "Dfu_") ~ 'FECD'))
+
+for_plot_duplicates <- for_plot %>% 
+   filter(str_detect(sample, "C_")) %>% 
+   mutate(type = ifelse(str_detect(miRNA, "-3p$"), "3p", "5p")) %>%
+   select(-miRNA) %>%
+   group_by(base_name, sample, type) %>%
+   summarise(n = n(), .groups = 'drop') %>%
+   filter(n > 1)
+
+for_plot_long <- for_plot %>% filter(str_detect(sample, "C_")) %>% 
+  mutate(type = ifelse(str_detect(miRNA, "-3p$"), "3p", "5p")) %>%
+  select(-miRNA) %>%
+  pivot_wider(
+    names_from = type,
+    values_from = expression,
+    values_fn = NULL) %>% 
+  group_by(base_name) %>%
+  summarise(
+    correlation = cor(`3p`, `5p`, method = "pearson")
+  ) %>%
+  arrange(desc(abs(correlation)))
+
+ggplot(for_plot_long, aes(x=reorder(base_name, correlation), y=correlation)) + geom_col() + 
+  theme(axis.text.x = element_text(angle = 90, size = 8) ) +
+  labs(title = "Corelation between -5P/3P in Control", x = "miRNA base name")
+
+
+
+
+```
+
+```{r fecd_53p, echo=F, fig.width=11, fig.height=7}
+
+# считаем корреляцию для каждой пары
+for_plot_long <- for_plot %>% filter(str_detect(sample, "Dfu_")) %>% 
+  mutate(type = ifelse(str_detect(miRNA, "-3p$"), "3p", "5p")) %>%
+  select(-miRNA) %>%
+  pivot_wider(
+    names_from = type,
+    values_from = expression) %>%
+  group_by(base_name) %>%
+  summarise(
+    correlation = cor(`3p`, `5p`, method = "pearson")
+  ) %>%
+  arrange(desc(abs(correlation)))
+
+ggplot(for_plot_long, aes(x=reorder(base_name, correlation), y=correlation)) + geom_col() + 
+  theme(axis.text.x = element_text(angle = 90, size = 8) ) +
+  labs(title = "Corelation between -5P/3P in FECD", x = "miRNA base name", y = 'Correlation')
+
+cor_mir <- for_plot_long %>% filter(correlation > 0.3) %>% 
+  mutate(a = paste0(base_name, "-3p"),b = paste0(base_name, "-5p")
+  ) %>% select(a, b) %>% unlist() %>% as.character()
+```
+
+```{r both_corrs53p, echo=F, fig.width=11, fig.height=7}
+for_plot_long <- for_plot %>% filter(str_detect(sample, "Dfu_")) %>% 
+  mutate(type = ifelse(str_detect(miRNA, "-3p$"), "3p", "5p")) %>%
+  select(-miRNA) %>%
+  pivot_wider(
+    names_from = type,
+    values_from = expression) %>%
+  group_by(base_name) %>%
+  summarise(
+    correlation = cor(`3p`, `5p`, method = "pearson")
+  ) %>%
+  arrange(desc(abs(correlation))) %>% rename('FECD' = 'correlation')
+
+for_plot_long <- left_join(for_plot_long, 
+  for_plot %>% filter(str_detect(sample, "C_")) %>% 
+  mutate(type = ifelse(str_detect(miRNA, "-3p$"), "3p", "5p")) %>%
+  select(-miRNA) %>%
+  pivot_wider(
+    names_from = type,
+    values_from = expression) %>%
+  group_by(base_name) %>%
+  summarise(
+    correlation = cor(`3p`, `5p`, method = "pearson")
+  ) %>% rename('Control' = 'correlation')
+  , by='base_name') %>% na.omit()
+
+for_plot_long <- for_plot_long %>% 
+  pivot_longer(cols = c(Control, FECD ), names_to = 'Group', values_to = 'Correlation')
+
+
+order_levels <- for_plot_long %>%
+  filter(Group == "FECD") %>%
+  arrange(Correlation) %>%
+  pull(base_name)
+
+for_plot_long <- for_plot_long %>%
+  mutate(base_name = factor(base_name, levels = order_levels))
+
+ggplot(for_plot_long, aes(x = base_name, y = Correlation, fill = Group)) +
+  geom_col(position = "dodge") +
+  theme(axis.text.x = element_text(angle = 90, size = 8)) +
+  labs(title = "Correlation between -5P/3P in Control vs FECD",
+       x = "miRNA base name")
+
+```
+
+# miR-29 analysis
+
+уровни разбросов mir29 боксплоты (3х2), не прошли pvalue
+
+```{r mir29box}
+
+for_plot <- norm_data_cleaned[grep('hsa-miR-29[abc]', rownames(norm_data_cleaned)), ] %>%
+  rownames_to_column("miRNA") %>% 
+  pivot_longer(cols = -miRNA, names_to = "Sample", values_to = "Expression") %>% 
+  mutate(Group = case_when(
+    str_detect(Sample, "C") ~ "Control",
+    str_detect(Sample, "D") ~ "FECD")) %>% left_join(diffexpressed_mirna, by='miRNA') 
+
+ggplot(for_plot,  aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(show.legend = T)+
+  scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+  geom_jitter(position=position_jitter(0.3), cex=1) +
+    theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 30, hjust = 0.5),
+        strip.text = element_text(size = 10)) +
+  labs(
+    #title = expression("Differentially expressed miRNA (" * log[2] * ")"),
+    #title = "Differentially expressed miRNA",
+    #y = expression(Log[2]~"Expression Level"), x='') +
+    y = "Expression Level", x='') +
+  facet_wrap(~reorder(miRNA, logFC), scales = "free")
+```
+
+мир29 депрессед, таргеты её шарашат, как и в той статье.
+
+разделение fecd/c
+
+```{r}
+v <- c('COL1A1', 'COL4A1', 'LAMC1')
+for_plot <- bind_rows(
+	cpm.symbol %>% rownames_to_column('gene') %>% filter(gene %in% v) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Nikitina et al.'),
+	nar %>% rownames_to_column('gene') %>% filter(gene %in% v) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Chu et al.')
+) %>% 
+	mutate(
+    Group = case_when(
+      grepl("^Ctrl|^C_", Sample) ~ "Control",
+      grepl("^FECD|^Dfu", Sample) ~ "FECD",
+      TRUE ~ NA_character_),
+    Dataset_Group = interaction(Dataset, Group))
+
+ggplot(for_plot, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F) + 
+	geom_jitter( position = position_jitterdodge(  jitter.width = 0.2,
+      jitter.height = 0,    # Вертикальный разброс (0 = нет)
+      dodge.width = 0.8     # Совпадает с position_dodge для boxplot
+    ), size=0.2, alpha = 0.7)+ 
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~gene, scales = 'free') +
+  labs(y = "Expression level (normalized counts)", x='')
+```
+
+пока что результаты согласуются - мир29 репрессирована в фекд, а её таргеты (которые они привели) обладают повышенной экспрессией. какие есть ещё потенциальные таргеты? их под 600, там есть почти все колы, можно плотнуть по ним.
+
+```{r}
+targets_table <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/targetsV10.RDS") %>% filter(`Support Type` != "Functional MTI (Weak)" & `Support Type` != "Non-Functional MTI (Weak)") %>% distinct()
+```
+
+all cols targets.
+
+```{r fig.width=11, fig.height=7}
+col_targets <- targets_table %>% filter(str_detect(miRNA, 'hsa-miR-29[abc]'), str_detect(`Target Gene`, '^COL' )) %>% pull(`Target Gene`)
+for_plot <- bind_rows(
+	cpm.symbol %>% rownames_to_column('gene') %>% filter(gene %in% col_targets) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Nikitina et al.'),
+	nar %>% rownames_to_column('gene') %>% filter(gene %in% col_targets) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Chu et al.')
+) %>% 
+	mutate(
+    Group = case_when(
+      grepl("^Ctrl|^C_", Sample) ~ "Control",
+      grepl("^FECD|^Dfu", Sample) ~ "FECD",
+      TRUE ~ NA_character_))
+
+ggplot(for_plot, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F) + 
+	#geom_jitter(aes(fill = Group), position = position_jitterdodge(  jitter.width = 0.2, jitter.height = 0, dodge.width = 0.8), size=0.2, alpha = 0.7) +
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~gene, scales = 'free') 
+```
+
+объединим из статьи + коллагены
+
+```{r fig.width=10, fig.height=6}
+col_targets <- targets_table %>% filter(str_detect(miRNA, 'hsa-miR-29[abc]'), str_detect(`Target Gene`, '^COL' )) %>% pull(`Target Gene`) 
+
+col_targets <- append(col_targets, 'LAMC1')
+
+for_plot <- bind_rows(
+	cpm.symbol %>% rownames_to_column('gene') %>% filter(gene %in% col_targets) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Nikitina et al.'),
+	nar %>% rownames_to_column('gene') %>% filter(gene %in% col_targets) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Chu et al.')
+) %>% 
+	mutate(
+    Group = case_when(
+      grepl("^Ctrl|^C_", Sample) ~ "Control",
+      grepl("^FECD|^Dfu", Sample) ~ "FECD",
+      TRUE ~ NA_character_))
+
+ggplot(for_plot, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F) + 
+	#geom_jitter(aes(fill = Group), position = position_jitterdodge(  jitter.width = 0.2, jitter.height = 0, dodge.width = 0.8), size=0.2, alpha = 0.7) +
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~gene, scales = 'free') +
+  labs(x='', y='Expression in CPM')
+```
+
+all targets
+
+```{r fig.width=15, fig.height=11}
+col_targets <- targets_table %>% filter(str_detect(miRNA, 'hsa-miR-29[abc]')) %>% pull(`Target Gene`)
+
+for_plot <- bind_rows(
+	cpm.symbol %>% rownames_to_column('gene') %>% filter(gene %in% col_targets) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Nikitina et al.'),
+	nar %>% rownames_to_column('gene') %>% filter(gene %in% col_targets) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Chu et al.')
+) %>% 
+	mutate(
+    Group = case_when(
+      grepl("^Ctrl|^C_", Sample) ~ "Control",
+      grepl("^FECD|^Dfu", Sample) ~ "FECD",
+      TRUE ~ NA_character_))
+
+ggplot(for_plot, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F) + 
+	geom_jitter(aes(fill = Group), position = position_jitterdodge(  jitter.width = 0.2,
+      jitter.height = 0, dodge.width = 0.8), size=0.2, alpha = 0.7) +
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~gene, scales = 'free') 
+```
+
+надо бы все эти таргеты прогнать через тест и дэг глянуть. + объединить их по kegg в какую-то структуру только logFC \> +1
+
+```{r fig.width=15, fig.height=11}
+mir29_fc <- for_plot %>%
+  group_by(gene, Dataset, Group) %>%
+  summarise(mean_expression = mean(Expression, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Group, values_from = mean_expression, names_prefix = "mean_") %>%
+  mutate(
+    FC = mean_FECD / mean_Control,
+    log2FC = log2(FC)) %>%
+  ungroup()
+#saveRDS(mir29_fc, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/mir29_targets.RDS")
+
+# Отбираем гены с |log2FC| > 1 (Fold Change > 2 или < 0.5)
+v <- mir29_fc %>%
+  filter((log2FC) > 1) %>%
+  arrange(Dataset, desc((log2FC)))
+
+
+for_plot_long <- for_plot %>%  filter(gene %in% v$gene)
+
+ggplot(for_plot_long, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F) + 
+	geom_jitter(aes(fill = Group), position = position_jitterdodge(  jitter.width = 0.2,
+      jitter.height = 0, dodge.width = 0.8), size=0.2, alpha = 0.7) +
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~gene, scales = 'free') 
+```
+
+kegg по таргетам дал похожий результат, как и в fecd таргетах (p adj sorted)
+
+![](images/clipboard-1652604402.png)
+
+отберём топ 8 с + связью и - связью по FC
+
+```{r fig.width=15, fig.height=11}
+top_miRNA <- mir29_fc %>% distinct(gene, log2FC) %>% arrange(desc(log2FC)) %>%
+  {bind_rows(slice_head(., n = 8), slice_tail(., n = 8))} %>% pull(gene) %>% unique()          
+
+for_plot_long <- for_plot %>% filter(gene %in% top_miRNA) %>% 
+	left_join(mir29_fc, by=c('gene', 'Dataset'))
+
+ggplot(for_plot_long, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F) + 
+	geom_jitter(aes(fill = Group), position = position_jitterdodge(  jitter.width = 0.2,
+      jitter.height = 0, dodge.width = 0.8), size=0.2, alpha = 0.7) +
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~~reorder(gene, log2FC), scales = 'free')
+```
+
+в control парах (где много) коррелирует с BCL2, мб какие-то апоптотические фишки.
+
+глянуть их дерегуляцию - незначительные изменения, можно написать
+
+```{r }
+v <- c('DICER1', 'DROSHA',  'DGCR8')
+for_plot <- bind_rows(
+	cpm.symbol %>% rownames_to_column('gene') %>% filter(gene %in% v) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Nikitina et al.'),
+	nar %>% rownames_to_column('gene') %>% filter(gene %in% v) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Chu et al.')
+) %>% 
+	mutate(
+    Group = case_when(
+      grepl("^Ctrl|^C_", Sample) ~ "Control",
+      grepl("^FECD|^Dfu", Sample) ~ "FECD",
+      TRUE ~ NA_character_),
+    Order = case_when(gene == 'DICER1' ~ 1, gene == 'DROSHA' ~ 2, gene == 'DGCR8' ~ 3))
+
+ggplot(for_plot, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F,position = position_dodge(width = 1)) + 
+	geom_jitter(aes(fill = Group), position = position_jitterdodge(  jitter.width = 0.2,       jitter.height = 0, dodge.width = 0.8), size=0.2, alpha = 0.7) +
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~ reorder(gene, Order), scales = 'free') +
+  labs(y = "Expression level (normalized counts)", x='')
+```
+
+### mir 630!
+
+```{r}
+v <- targets_table %>% filter(str_detect(miRNA, 'hsa-miR-630')) %>% pull(`Target Gene`)
+for_plot <- bind_rows(
+	cpm.symbol %>% rownames_to_column('gene') %>% filter(gene %in% v) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Nikitina et al.'),
+	nar %>% rownames_to_column('gene') %>% filter(gene %in% v) %>% 
+		pivot_longer(cols = -gene, names_to = 'Sample', values_to = 'Expression') %>% 
+		mutate(Dataset = 'Chu et al.')
+) %>% 
+	mutate(
+    Group = case_when(
+      grepl("^Ctrl|^C_", Sample) ~ "Control",
+      grepl("^FECD|^Dfu", Sample) ~ "FECD",
+      TRUE ~ NA_character_))
+
+ggplot(for_plot, aes(x=Dataset, y=Expression, fill = Group))	+ geom_boxplot(outliers = F) + 
+	geom_jitter(aes(fill = Group), position = position_jitterdodge(jitter.width = 0.2,
+      jitter.height = 0, dodge.width = 0.8), size=0.2, alpha = 0.7) +
+	scale_fill_manual(values = c("Control" = "#00BFC4", "FECD" = "#F8766D")) +
+	facet_wrap(~gene, scales = 'free') +
+  labs(y = "Expression level (normalized counts)", x='')
+```
+
+Как будто 630 практически ни на что не влияет, только есть snai2 - EMT change
+
+про иммунку можно написать, вместе с оверэкспрессией hla, но непонятно что там
+
+цветом покраси. среднее по вектору нарис рядом. для тех у кого есть хост построить корр плот кто лучше с хостом коррелируют
+
+скаттерплот средняя экспрессия (по 3 и по 5) против корреляции по фекд-контролю.
+
+пересчитать корр по фекд и контрол отдельно
+
+уточнить про таргеты 29 в базе таргетов, по а б с
+
+хосты
+
+```{r, eval=F}
+
+all_plot_data <- long_data %>%
+  mutate(type = ifelse(str_detect(miRNA, "-3p$"), "3p", "5p")) %>%
+  pivot_wider(names_from = type, values_from = expression)
+
+ggplot(all_plot_data, aes(x = `3p`, y = `5p`)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ base_name, scales = "free") +
+  labs(title = "Корреляция между -3p и -5p формами miRNA",
+       x = "Экспрессия -3p",
+       y = "Экспрессия -5p") +
+  theme_minimal()
+
+
+```
+
+### Вытаскиваем список всех миРНК в чипе, чтобы потом получить их координаты из аннотации
+
+```{r formatting_names_allchip_mirna}
+chip_names <- rownames(norm_data)
+chip_names <- sapply(chip_names, toupper)
+chip_names <- gsub('HSA-', '', chip_names)
+chip_names <- as.data.frame(chip_names, row.names = NULL)
+colnames(chip_names) <- 'HGNC_name'
+
+# сохраняем исходное имя мирнк для таблицы с таргетами
+chip_names$miRNA <- row.names(chip_names)
+
+# выделяем 5/3p в колонку
+# если не указан стрэнд - пишем 5p
+chip_names$mir_strand <- ifelse(grepl("5P", chip_names$HGNC_name), "5P",
+                             ifelse(grepl("3P", chip_names$HGNC_name), "3P", "5P"))
+
+
+# сокращаем название (удаляем 5P 3P) 
+# раньше удалял все "-", теперь оставляем тк есть имена 1185-2
+chip_names$HGNC_name <- gsub('-5P', '', gsub('-3P', '', chip_names$HGNC_name))
+
+
+# вынести в отдельную колонку суффикс, как и в аннот.
+# надо ли это делать? мб будет сложнее сметчить по колонкам
+# как будто проще потом дометчить по другой колонке
+# пока уберём
+# chip_names <- separate(chip_names, HGNC_name, into = c("HGNC_name", "name_suffix"), sep = "-", remove = F)
+
+
+# удаляем первое вхождение "-"
+# тк в HGNC MIR пишется слитно с цифрой
+chip_names$HGNC_name <- sub("-", "", chip_names$HGNC_name)
+
+
+# добавляю MIMAT id
+chip_names <- merge(chip_names, other_data[, c("Probe Name", "Accession #")], 
+                          by.x = "miRNA", by.y = "Probe Name")
+chip_names <- rename(chip_names, 'MIMAT_ID' = "Accession #")
+
+
+# LET7A --> MIRLET7A
+# изменим это в изначальном chip, тк имена должны быть как в анноте
+chip_names$HGNC_name <- gsub("^LET", "MIRLET", chip_names$HGNC_name)
+chip_names$HGNC_name <- gsub("MIRLET7A", "MIRLET7A", chip_names$HGNC_name)
+
+# MIR1+MIR2+MIR3 --> MIR1
+# есть мирнк через +, оставим только 1ю часть
+# части после + пока уберём
+chip_names$HGNC_name <- sub("\\+.*", "", chip_names$HGNC_name)
+
+# Удаляем миРНК, отозванные из аннотации
+# 10.02.25 - не будем удалять
+# chip_names <- chip_names %>%
+#   filter(!grepl("MIR1254|MIR4461|MIR4532|MIR4792|MIR566", HGNC_name))
+
+# MIR92A-1 --> MIR92A1
+# удаляем лишний дефис в названиях
+# мержим по полному имени
+chip_names$HGNC_name <- gsub("(MIR[0-9]+[A-Z]+)-([0-9]+)", "\\1\\2", chip_names$HGNC_name)
+
+saveRDS(chip_names, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/chip_names.RDS")
+```
+
+```{r samples_vector, eval=F}
+# вытащим назв-я образцов в правильном виде (а зачем?)
+samples_names <- colnames(norm_data)
+samples_names <- gsub("^C_(\\d+)$", "C_2\\1", samples_names) 
+samples_names <- gsub("^D_(\\d+)$", "D_2\\1", samples_names)  
+# saveRDS(samples_names, file="/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/samples_names.RDS")
+```
+
+Мы получили список дифэкспрессированых микроРНК и список всех микроРНК генов в чипе. Исправили названия для последующей обработки. На этом 1 этап анализа завершён.
+
+# Конец 1 части анализа
+
+------------------------------------------------------------------------
