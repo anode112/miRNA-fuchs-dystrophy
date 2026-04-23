@@ -1,0 +1,1344 @@
+---
+title: "03 miRNA analysis: correlation with RNA-seq and miRNA's targets"
+author: "D. Ryazantsev, E. Sharova"
+date: "2025-08-24"
+output:
+  github_document:
+    toc: yes
+    #toc_float: yes
+    toc_depth: 5
+    number_sections: true
+  pdf_document:
+    latex_engine: xelatex
+    includes:
+      in_header: preamble.tex
+  word_document:
+link-citations: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, echo = F}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, dpi = 32, fig.retina = 1, dev = "svglite", jpeg.quality = 85 )
+storeWarn<- getOption("warn")
+options(warn = -1)
+options(bitmapType='cairo')
+suppressPackageStartupMessages(library(ComplexHeatmap))
+```
+
+```{r packages, echo=F, error=F, message=FALSE, warning=FALSE}
+library(psych)
+library(matrixStats)
+library(ggVennDiagram)
+library(DT)
+library(ComplexHeatmap)
+library(magick) 
+library(RColorBrewer)
+library(edgeR)
+library(readxl) 
+library(xlsx) 
+library(corrplot)
+library(ggrepel)
+library(glue)
+library(tidyverse)
+library(dplyr)
+#sessionInfo()
+```
+
+# Data import & filtering
+
+**Analysis steps:**
+
+1. **Load and preprocess data**  
+   - miRNA: normalized counts (NanoString), remove poor samples (`C_209`–`C_211`, `Dfu_209`, `Dfu_223`)  
+   - RNA‑seq: CPM counts (log‑transformed → back‑transformed), filter genes with CPM < 15  
+
+2. **Spearman correlation analysis**  
+   - Separately for Control and FECD samples  
+   - Between every gene and every miRNA  
+
+3. **Select negatively correlated pairs**  
+   - Threshold ≤ –0.7 (potential miRNA–target interactions)  
+
+4. **Statistical significance assessment**  
+   - Permutation test (100 iterations) for each pair  
+   - Compute p‑value and FDR  
+
+5. **Filter by experimentally supported targets**  
+   - Keep only pairs present in miRTarBase v10  
+
+6. **Validate on independent RNA‑seq datasets**  
+   - Add gene expression from two sources: our dataset and NAR Chu et al.  
+   - Add expression in HCEC cell line  
+
+7. **Calculate log₂FC (FECD vs Control)**  
+   - Subtract log‑transformed values (FECD – Control)  
+
+8. **Final pair selection**  
+   - Criterion: |log₂FC| ≥ 2 (at least 4‑fold change in gene expression)  
+   - Additionally flag whether the pattern is reproducible in HCEC (`check_HCEC`)  
+
+9. **Annotate pairs**  
+   - Gencode (HGNC symbols, strand, coordinates, gene type)  
+   - MIMAT (mirBase)  
+
+10. **Overlap with previously identified differentially expressed miRNAs**  
+    - Compare final pairs with DEGs from `01_QC`  
+
+11. **Visualisation**  
+    - Venn diagrams (unique genes and miRNAs in Control vs FECD, overlaps with all miRNAs and DEGs)  
+    - Boxplots of gene expression for final pairs (log‑transformed CPM, with outliers highlighted)
+
+```{r import_all}
+a <- dirname(rstudioapi::getSourceEditorContext()$path) 
+setwd(a)
+diffexpressed_mirna_HGNC <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/diffexpressed_mirna_HGNC.RDS")
+chip_names <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/chip_names.RDS")
+norm_data <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/norm_data.RDS")
+metadata <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/metadata.RDS")
+metadata$Sample_name <- sub('_endo', '', metadata$Sample_name)
+annot_chipdf <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/annot_chipdf.RDS") %>% filter(type == "gene") %>% dplyr::select(where(~ !all(is.na(.))))
+
+```
+
+**Load expression data**
+
+Obtained CPM counts from Elena. They are in log-transformed format and need to be converted back. Files in the directory:
+
+- `cpm.symbol.RDS` — matrix with gene symbols and their counts
+- `cpm.symbol.group.RDS` — gene symbols grouped by dataset (cult, fetal, nar, etc.) with control/FECD samples
+- `cpm.tr.RDS` — transcripts with ENST IDs
+- `cpm.tr.group.RDS` — grouped by dataset
+
+**Work plan**
+
+1. Select genes present in our analysis
+2. Remove log transformation, filter by low expression threshold, try different cutoffs
+3. Plot distribution
+4. Generate correlation plots
+
+```{r}
+cpm.symbol <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/illumina/Fuchs_transcriptomes/analysis/transcript_analysis/RDS/expression/cpm.symbol_list.RDS")
+HCEC_cpm <- as.data.frame(cpm.symbol[[2]])
+HCEC_cpm <- HCEC_cpm[, "HCEC", drop = FALSE]
+cpm.symbol <- cpm.symbol[[1]]
+cpm.symbol.group <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/illumina/Fuchs_transcriptomes/analysis/transcript_analysis/RDS/expression/cpm.symbol.group_list.RDS")
+```
+**Let's try removing samples C209-C211 from the analysis.**
+
+Samples C209-C211 should be excluded from the analysis because they have strange transcriptomes.
+
+As a result, the expression graph's dome flattened, and the final table expanded from ~170 to 511 pairs. Elena said this is ok, so we'll keep it.
+
+Let's also try removing Dfu_209, 223 because they're not corneal endothelium.
+
+```{r select_cols}
+# select columns (cut by miRNA samples)
+samples_names <- c("C_201", "C_202", "C_203", "C_204", "C_205", "C_206", "C_207", "C_208", "C_209", "C_210", "C_211", "Dfu_203", "Dfu_204", "Dfu_205", "Dfu_206", "Dfu_207", "Dfu_208", "Dfu_209", "Dfu_210", "Dfu_212", "Dfu_213", "Dfu_216", "Dfu_219", "Dfu_223", "Dfu_224", "Dfu_225", "Dfu_226")
+
+# remove С209-С211
+samples_names <- samples_names[-which(samples_names %in% c("C_209", "C_210", "C_211", "Dfu_209", "Dfu_223") )]
+
+# remove C_209", "C_210", "C_211 (already removed)
+norm_data <- norm_data %>% select(-c("C_209", "C_210", "C_211", 'Dfu_209', 'Dfu_223'))
+cpm.symbol <- cpm.symbol[, colnames(cpm.symbol) %in% samples_names]
+```
+
+
+### Filtering gene expression data
+
+**Convert from log to normal form.**
+Sometimes it's necessary to subtract 1, because 0s aren't logarithmized and 1 (pseudocount) is added. Subtracting 1 is a bad idea, so we don't do that here.
+
+Returning the matrix from the logarithmized state
+
+```{r de_log}
+cpm.symbol <- 2^cpm.symbol
+min(cpm.symbol) # the minimum is not 1, which means they got rid of the zeros using another method
+```
+
+### Removing near-zero Values
+
+We need to filter out near-zero values obtained in the logarithm procedure. To do this, we'll construct a distribution and find the peak corresponding to the zero value.
+
+```{r, echo=F}
+df_long <- pivot_longer(cpm.symbol, cols = everything(), 
+                        names_to = "Sample", values_to = "Expression")
+ggplot(df_long, aes(x = Expression, color = Sample)) +
+  geom_density(show.legend = FALSE) +
+  labs(title = "Density Plot of gene expression before filtration",
+       x = "Gene expression Level (100 limit)",
+       y = "Density") +  theme_minimal() +
+  scale_x_continuous(limits = c(1, 100)) +
+  geom_vline(xintercept=15, linetype="dotted", color="red", size=0.9) +
+  annotate("text", x = 25, y = 0.035, label = "Threshold = 15", color = "black", angle = 0, vjust = -0.5)
+```
+
+Let's trim low expressed genes in the expression matrix at the `max 15` cpm boundary and see the result.
+```{r filter_expression, echo=F}
+row_max <- rowMaxs(as.matrix(cpm.symbol))
+cpm.symbol <- cpm.symbol[row_max >= 15, ]
+df_long <- pivot_longer(as.data.frame(cpm.symbol), cols = everything(), names_to = "Sample", values_to = "Expression")
+
+ggplot(df_long, aes(x = Expression, color = Sample)) +
+  geom_density(show.legend = FALSE) +
+  labs(title = "Density Plot of gene expression after filtration", x = "Gene expression Level (100 limit)", y = "Density") + theme_minimal() +
+  scale_x_continuous(limits = c(1, 100))
+```
+
+The curve looks roughly the same, but our goal wasn't to completely remove the peak—only the zero values, which introduce noise. We'll also evaluate the miRNA expression distribution. It will likely need to be trimmed as well, as noise could interfere with the correlation.
+
+### Evaluate and filter the miRNA expression distribution
+
+We'll do the same, but for MIR. We'll plot a graph combining the expression of all miRNA samples. The presence of noise at the beginning is evident.
+
+```{r all_samples_together, echo=F}
+expr_vals <- unlist(norm_data)
+expr_vals <- data.frame(Expression = expr_vals)
+ggplot(expr_vals, aes(x = Expression)) +
+  geom_density(show.legend = FALSE) +
+  labs(
+    title = "Density Plot of all samples miRNA Expression",
+    x = "Expression Level (15 limit)",
+    y = "Density") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(1, 15))
+```
+
+Let's build a plot using the samples.
+
+```{r fig.height=6, fig.width=7, echo=F}
+df_long <- pivot_longer(as.data.frame(norm_data), cols = everything(), names_to = "Sample", values_to = "Expression")
+
+ggplot(df_long, aes(x = Expression, color = Sample)) +
+  geom_density(show.legend = F) +
+  labs(
+    title = "Density Plot of miRNA Expression by samples",
+    x = "Expression Level (12 limit)", y = "Density") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(1, 12))
+```
+
+A graph with all samples as facets. We look at the chip (run ID) and phenotype (FECD). We'll do a log10.
+
+```{r all_facets_run_id, echo=F}
+df_long <- pivot_longer(as.data.frame(norm_data), cols = everything(), names_to = "Sample", values_to = "Expression")
+# add meta run ID
+df_long <- merge(df_long, metadata, 
+                            by.x = "Sample", by.y = "Sample_name", all.y = F, all.x = F) %>% mutate(Expression = log10(Expression))
+
+ggplot(df_long, aes(x = Expression, color = Sample)) +
+  geom_density(show.legend = T) +
+  labs(
+    title = "miRNA Expression by Run ID and FECD",
+    x = "log10 Expression Level",
+    y = "Density") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(1, 5)) +
+  facet_grid(Run ~ Group)
+
+ggplot(df_long, aes(x = Expression)) +
+  geom_density(show.legend = T) +
+  labs(
+    title = "miRNA Expression by Run ID and FECD",
+    x = "log10 Expression Level",
+    y = "Density") +
+  theme_minimal() +
+  facet_grid(Run ~ Group)
+
+ggplot(df_long, aes(x = Expression)) +
+  geom_density(show.legend = T) +
+  labs(
+    title = "miRNA Expression by Run ID and FECD",
+    x = "log10 Expression Level",
+    y = "Density") +
+  theme_minimal() +
+  facet_grid(~ Group)
+```
+
+# Correlation Analysis
+
+We used Spearman's rank correlation to determine which miRNAs correlated with which RNA counts within the samples.
+
+```{r all_corr}
+common_samples <- intersect(colnames(cpm.symbol), colnames(norm_data))
+filtered_genes <- cpm.symbol[, common_samples, drop = FALSE]
+norm_data_genes <- norm_data[, common_samples, drop = FALSE]
+correlation_matrix <- cor(t(filtered_genes), t(norm_data_genes), method = "spearman")
+```
+
+Let's estimate the correlation thresholds (if there's a 1, it means the numbers are identical and there's an error somewhere) and the distribution of values in the matrix. We'll be interested in the numbers in the tails—the strongest positive and negative correlations.
+```{r, echo=F}
+max(unlist(correlation_matrix))
+min(unlist(correlation_matrix))
+
+df_long <- pivot_longer(as.data.frame(correlation_matrix), cols = everything(), names_to = "Sample", values_to = "Expression")
+
+ggplot(df_long, aes(x = Expression)) +
+  geom_density(show.legend = F) +
+  labs(
+    title = "Correlation matrix density plot with cutoffs",
+    x = "Expression Level",
+    y = "Density") +
+  theme_minimal() +
+  geom_vline(xintercept=-0.8, linetype="dotted", color="red", size=0.9)+
+  geom_vline(xintercept=0.9, linetype="dotted", color="red", size=0.9)
+```
+
+Let's select the most highly and least correlated pairs, from min to -0.8 and from +0.9 to max.
+
+**Which correlations are of interest to us?**
+
+- Negative - miRNA regulates the gene (target)
+
+- Positive - miRNA is located within the gene (mirtron), expressed in parallel with it
+
+**Looking for cutoffs**
+
+We'll try different cutoffs for the expression matrix. We'll plot scatterplots for different cutoffs (+0.9 and -0.9), separately for +cor and -cor, etc., to understand where the counts are clustered:
+
+- corr \~ cpm RNA counts
+
+- corr \~ miRNA counts
+
+- cpm RNA counts \~ miRNA counts
+
+```{r, echo=F}
+filtered_matrix <- correlation_matrix
+filtered_matrix <- as.data.frame(as.table(filtered_matrix)) %>%
+  filter((Freq) >= 0.9)
+# construct the dependence of correlation values on RNA counts
+# to do this, intersect the correlation matrix with the expression matrix by gene name
+
+# to merge them, convert each to long format
+# expression
+df_long <- cpm.symbol %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene") %>%  
+  pivot_longer(cols = -Gene,      
+               names_to = "Sample", 
+               values_to = "Expression")
+
+merged_data <- merge(filtered_matrix, df_long, by.x = "Var1", by.y = "Gene", all.y = F, all.x = F)
+
+merged_data$Expression <- log2(merged_data$Expression +1) 
+
+ggplot(merged_data, aes(x = Expression, y = Freq)) +  
+  geom_point() +
+  labs(x = "RNA expressions in cpm counts (log2+1)", y = "Correlation Level", title = "Correlation values > 0.9") +
+  theme_minimal() 
+```
+
+From plot
+
+```{r, echo=F}
+filtered_matrix <- correlation_matrix
+
+# get downregulated !
+filtered_matrix <- as.data.frame(as.table(filtered_matrix)) %>%
+  filter((Freq) <= -0.85) 
+
+df_long <- cpm.symbol %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene") %>%  
+  pivot_longer(cols = -Gene,      
+               names_to = "Sample", 
+               values_to = "Expression")
+
+merged_data <- merge(filtered_matrix, df_long, by.x = "Var1", by.y = "Gene", all.y = F, all.x = F) 
+
+length(unique(merged_data$Var1))
+
+merged_data$Expression <- log2(merged_data$Expression +1) 
+
+ggplot(merged_data, aes(x = Expression, y = Freq)) +  
+  geom_point() +
+  labs(x = "log2+1 RNA cpm counts", y = "Correlation Level", title = "Correlation values < - 0.85") +
+  theme_minimal()
+
+#  get pairs
+downcorr_pairs <- merged_data %>% 
+  select(Var1, Var2) %>% 
+  distinct()
+```
+
+**down-correlated pairs visualization**
+
+To do this, we need to add miRNA and gene expression values from the transcriptome for each sample in the group to the pairs. We also need to add control-fecd coloring. We'll create a table for the graphs.
+
+```{r all_facet_plot, fig.height=20, fig.width=12, eval=F, echo=F}
+# pull metadata for all samples per gene pair per row
+# aka Cartesian product
+df_long <- merge(downcorr_pairs, metadata, by = NULL)
+
+# add expression values
+for_merge <- cpm.symbol %>%
+rownames_to_column(var = "Var1") %>%
+pivot_longer(cols = -Var1, names_to = "Sample_name", values_to = "gene_expression")
+
+# merge by gene - sample columns
+df_long <- df_long %>%
+left_join(for_merge, by = c("Var1", "Sample_name"))
+
+# both columns have the same name, so we need to distinguish them
+#df_long <- df_long %>% rename('gene_expression' = 'expression')
+
+# adding miRNA counts
+# converting to long format
+for_merge <- norm_data_genes %>%
+rownames_to_column("Var2") %>%
+pivot_longer(cols = -Var2, names_to = "Sample_name", values_to = "mirna_expression")
+
+# merging
+df_long <- df_long %>%
+left_join(for_merge, by = c("Var2", "Sample_name"))
+
+# probably need to take the logarithm
+df_long$gene_expression <- log2(df_long$gene_expression+1)
+#df_long$mirna_expression <- log2(df_long$mirna_expression)
+
+# samples with no transcriptome with NA in the expr were pulled from the metadata; we'll remove them their
+df_long <- na.omit(df_long)
+# try 1 pair
+# df_long <- df_long %>% filter(Var1 == 'ABCA5', Var2 == 'hsa-miR-331-5p')
+
+# combine pairs into 1 column, probably get
+df_long$Vars = paste(df_long$Var1, df_long$Var2, sep = "+")
+
+# plot
+# downreg_plot <- ggplot(df_long, aes(x = gene_expression, y= mirna_expression, colour = FECD, label=Sample_name)) +
+#   geom_point(alpha = 0.7, size = 1., show.legend = T) +
+#   labs(
+#     title = "Downregulation gene-mirna pairs",
+#     x = "RNA expressions in cpm counts (log2+1)",
+#     y = "miRNA counts") +
+#   facet_wrap(Vars ~ ., scales = "free", ncol = 4, labeller=) +
+#   theme(
+#     axis.text.x=element_text(size = 2.5, colour = "black"), 
+#     axis.text.y=element_text(size = 2.5, colour = "black"), 
+#     strip.text = element_blank(), 
+#     strip.text.x = element_text(size = 3, colour = "black")) 
+
+#downreg_plot
+```
+Now lets plot the dependence of RNA counts on miRNA for each of the downregulated pairs.
+
+
+NB. I removed the big plot from final HTML to decrease its filesize. 
+**From the plot, we see:**
+
+1. Most controls with high gene expression have low miRNA expression.
+2. Most experimental samples have low or moderate gene expression and high miRNA counts.
+3. But that's not important here. The main thing we're looking at is the correlation line, which should be from left to right, top to bottom, to see if they correlate negatively. A negative line is visible in many samples.
+4. However, the samples are clustered {.underline}, meaning we need to calculate the correlation within each of the FECD Control groups.
+
+## Correlation in FECD and Control
+
+We calculate the same thing (correlation and further), but for each group separately. Let's try using Spearman's rank correlation—it was used in [article](https://pmc.ncbi.nlm.nih.gov/articles/PMC10056610/)
+
+### Control correlations 
+
+```{r corr_m_2_Control}
+common_samples <- intersect(colnames(cpm.symbol), colnames(norm_data))
+common_samples <- common_samples[grepl("C_", common_samples)]
+filtered_genes <- cpm.symbol[, common_samples, drop = FALSE]
+norm_data_genes <- norm_data[, common_samples, drop = FALSE]
+# t() to calculate the correction between rows, not columns
+correlation_matrix <- cor(t(filtered_genes), t(norm_data_genes), method = "spearman")
+```
+
+
+
+
+**Visualizing the Control distribution.**
+Lets visualise the Control distribution to find cutoffs and try different ones. 
+```{r dens_Control, echo=F}
+df_long <- pivot_longer(as.data.frame(correlation_matrix), cols = everything(), names_to = "Sample", values_to = "Expression")
+
+ggplot(df_long, aes(x = Expression)) +
+  geom_density(show.legend = F) +
+  labs(title = "Correlation matrix on Controls density plot with cutoffs",
+    x = "Expression Level",
+    y = "Density") +
+  theme_minimal() +
+  geom_vline(xintercept=-0.8, linetype="dotted", color="red", size=0.9) +
+  geom_vline(xintercept=0.7, linetype="dotted", color="red", size=0.9)
+```
+
+Control: set 0,9 cutoff, then 0.7.
+
+```{r control_cutoff_get_pairs}
+# cutoff value
+CUTOFF_CONTROL <- -0.7
+
+# set the cutoff
+filtered_matrix <- correlation_matrix
+# convert to long format
+filtered_matrix <- as.data.frame(as.table(filtered_matrix)) %>%
+filter((Freq) <= CUTOFF_CONTROL)
+# plot the dependence of correlation values on RNA counts
+# to do this, intersect the correlation matrix with the expression matrix by gene name
+# to merge them, convert each to long format
+# expression
+df_long <- cpm.symbol %>%
+as.data.frame() %>%
+rownames_to_column("Gene") %>%
+select(Gene, matches("^C")) %>% # only columns with "C" in the header
+pivot_longer(
+cols = -Gene,
+names_to = "Sample",
+values_to = "Expression")
+
+# merge
+merged_data <- merge(filtered_matrix, df_long, by.x = "Var1", by.y = "Gene", all.y = F, all.x = F)
+
+# ggplot(merged_data, aes(x = Expression, y = Freq)) +
+# geom_point() +
+# labs(x = "RNA expressions in cpm counts (de-log2)", y = "Control Correlation Level", title = glue("Control Correlation values <= {CUTOFF_CONTROL}")) + theme_minimal()
+
+# extract pairs from this cutoff
+# filter: try filtering by
+
+downcorr_pairs_c <- merged_data %>% select(-Sample, -Expression) %>% distinct()
+```
+
+**Cutoff is**: `r CUTOFF_CONTROL`
+
+Let's add an HCEC cell line as a reference for the presence of transcription of selected genes in the specified line. To understand which genes are expressed in it, compare gene counts gene-by-gene and create a vector.
+
+### FECD correlation
+
+Now lets calculate the correlation only for FECD samples.
+
+```{r corr_m_2_FECD}
+common_samples <- intersect(colnames(cpm.symbol), colnames(norm_data))
+# choose FECD
+common_samples <- common_samples[grepl("D", common_samples)]
+filtered_genes <- cpm.symbol[, common_samples, drop = FALSE]
+norm_data_genes <- norm_data[, common_samples, drop = FALSE]
+correlation_matrix <- cor(t(filtered_genes), t(norm_data_genes), method = "spearman")
+```
+
+FECD distribution
+
+```{r FECD_dens, echo=F}
+
+df_long <- pivot_longer(as.data.frame(correlation_matrix), cols = everything(), names_to = "Sample", values_to = "Expression")
+
+ggplot(df_long, aes(x = Expression)) +
+  geom_density(show.legend = F) +
+  labs(
+    title = "Correlation matrix on FECD density plot with cutoffs",
+    x = "Expression Level",
+    y = "Density") +
+  theme_minimal() +
+  geom_vline(xintercept=-0.8, linetype="dotted", color="red", size=0.9) +
+  geom_vline(xintercept=0.9, linetype="dotted", color="red", size=0.9)
+```
+
+FECD cutoff
+
+```{r FECD_cutoff_get_pairs}
+
+CUTOFF_FECD <- -0.7
+# set a cutoff
+filtered_matrix <- correlation_matrix
+# convert to long format
+filtered_matrix <- as.data.frame(as.table(filtered_matrix)) %>%
+filter((Freq) <= CUTOFF_FECD)
+
+# plot the dependence of correlation values on RNA counts
+# to do this, intersect the correlation matrix with the expression matrix by gene name
+
+# to merge them, convert each to long format
+# expression
+df_long <- cpm.symbol %>%
+as.data.frame() %>%
+rownames_to_column("Gene") %>%
+select(Gene, matches("^D")) %>%  
+pivot_longer(
+cols = -Gene,
+names_to = "Sample",
+values_to = "Expression"
+)
+# merge
+merged_data <- merge(filtered_matrix, df_long, by.x = "Var1", by.y = "Gene", all.y = F, all.x = F)
+
+# extract pairs from this cutoff
+downcorr_pairs_f <- merged_data %>% 
+  select(-Sample, -Expression) %>%
+  distinct()
+```
+
+
+**Biological Cutoff**
+
+We cutoff at 0.9 because we were targeting a small sample size to ensure everything worked. However, values of 0.9+ aren't very biological and are likely erroneous, as this is too high a correlation.
+A true biological correlation should be between 0.7 and 0.8. We can see from the scatterplot for the cutoff that there are many correlations at 0, and we can't immediately determine whether it's true or false. The biological correlation is around 0.5, so we're targeting 0.7.
+
+**We'll cutoff at 0.7 (**correct the constant in the previous code**)** and continue working with this sample. First, we'll select the miRNA-Target pairs from the cutoff in the target table. Out of 61,192, 567 pairs remain.
+
+# MIR-Target gene pair trimming 
+
+Now we need to select from the downcorrelated pairs those that are in the miRNA-Target Gene table
+We'll select the desired pairs for both groups here so we can delete the target table later.
+Let's try the target table v10 (previously it was v8). Table 10 is an order of magnitude larger than 8.
+
+```{r check_targets_in_pairs_all, echo=T}
+targets_table <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/targetsV10.RDS")
+targets_table <- targets_table %>% mutate(pair = paste(`Target Gene`, miRNA, sep = "++"))
+# Control was 61192 now 567
+# create additional columns to combine tables
+downcorr_pairs_c <- downcorr_pairs_c %>% mutate(pair = paste(Var1, Var2, sep = "++"))
+# calculate the average correlation across all samples
+downcorr_pairs_c <- downcorr_pairs_c %>%
+group_by(pair) %>% # group by pair
+summarise(Freq = mean(Freq)) %>%
+ungroup() %>%
+separate(pair, into = c("Var1", "Var2"), sep = "\\+\\+", remove = F)
+
+# select by pairs
+downcorr_pairs_c <- downcorr_pairs_c %>%
+ filter(pair %in% targets_table$pair)
+
+# FECD was 171173 now 1849
+# create additional columns to combine tables
+downcorr_pairs_f <- downcorr_pairs_f %>%
+mutate(pair = paste(Var1, Var2, sep = "++"))
+
+# calculate the average correlation across all samples
+downcorr_pairs_f <- downcorr_pairs_f %>%
+group_by(pair) %>% # group by pair
+summarise(Freq = mean(Freq)) %>%
+ungroup() %>%
+separate(pair, into = c("Var1", "Var2"), sep = "\\+\\+", remove = F)
+
+downcorr_pairs_f <- downcorr_pairs_f %>% 
+filter(pair %in% targets_table$pair)
+
+# add targets to diffexpr
+# got 51491, without weak: 275
+diffexpressed_mirna_targets <- diffexpressed_mirna_HGNC %>% 
+left_join(targets_table, by="miRNA") %>% 
+filter(`Support Type` != "Functional MTI (Weak)" & `Support Type` != "Non-Functional MTI (Weak)")
+
+n_distinct(diffexpressed_mirna_targets$miRNA)
+
+rm(targets_table)
+gc()
+```
+
+I added targets to the differentially expressed ones, 51,491 in total, excluding "Non-Functional MTI (Weak)" (275). However, only 21/31 miRNAs were targeted. Without filtering, all 31 were targeted.
+
+```{r echo=F}
+# knitr::kable(diffexpressed_mirna_targets, caption = "Differentially expressed miRNAs with targets (evidence cutoff)")
+knitr::kable(diffexpressed_mirna_targets, caption = "Differentially expressed miRNAs with targets (evidence cutoff)")
+```
+
+**Differences between version 8 and 10 databases.**
+
+| Group | Result: Pairs | After pruning by V8 targets | After pruning by V10 targets |
+|---------|----------------|------------------------------|-------------------------------|
+| Control | 61192          | 567                          | 2260                          |
+| FECD    | 171173         | 1849                         | 6121                          |
+
+## P-value FECD and Control Bootstrap (permutation) 
+
+I tried different methods to obtain correlations' p-values, and came to conclusion than permutation method will be the most accurate way.
+
+We calculate the p-value based on its definition: how many equal or smaller values (if the correlation is negative, more if the correlation is positive, i.e., greater in absolute value) will be obtained when repeated 100 times. We need to ensure that permutation combinations do not repeat. We shuffle the RNA symbols and sample names.
+
+Two calculation options:
+
+1. Record all generated intersections and then calculate the % across all of them.
+2. Compare on the fly and record the counts, showing how many are higher and how many are lower, then divide by the number of permutations.
+
+[Principle:]{.underline} correlation is calculated as MIR-1 x RNA-1 across all samples, i.e. MIR-1 (S1,S2,Sn) x RNA-1 (S1,S2,Sn). Therefore, to calculate the probability of obtaining such a correlation value by chance (aka p-vale), we need to substitute different sample values into one of the matrices: RNA-1 (Sn) x MIR-1 (MIR-x).
+
+It appears that cor simply counts the rows in order (since changing the names didn't work), so we'll change the row order. The function is concerned with the order of the values in the vector, not their names.
+
+
+```{r permute_pv_all, echo=T, eval=F}
+n_permutations <- 100
+
+# Shuffle only samples (colnames)
+permute_and_calculate <- function() {
+
+# create a df for shuffling
+permuted_norm_data <- norm_data_genes[sample(ncol(norm_data_genes)), ]
+# Take a sample of norm_data_genes columns
+permuted_names <- sample(colnames(norm_data_genes))
+
+# Substitute names from the sample
+colnames(permuted_norm_data) <- permuted_names
+cor(t(filtered_genes), t(permuted_norm_data), method = "spearman")
+}
+
+# permutations. replicate uses the function many times.
+system.time({
+perm_cor_list <- replicate(n_permutations, permute_and_calculate(), simplify = FALSE)
+})
+# So we got a list with matrices from different permutations.
+# Now we need to calculate pval.
+# Convert the list to an array.
+perm_cor_list <- array(unlist(perm_cor_list), dim = c(nrow(filtered_genes), nrow(norm_data_genes), n_permutations))
+
+# Calculate the p value.
+pvals_permute <- matrix(NA, nrow = nrow(filtered_genes), ncol = nrow(norm_data_genes))
+
+system.time({
+for (i in 1:nrow(filtered_genes)) {
+for (j in 1:nrow(norm_data_genes)) {
+# Extract all values in a cell using [i, j, ] 
+perm_cor_values <- perm_cor_list[i, j, ] 
+pvals_permute[i, j] <- mean(abs(perm_cor_values) >= abs(correlation_matrix[i, j])) 
+}
+}
+})
+
+# padj:
+p_adj_control <- matrix(p.adjust((pvals_permute), method = "fdr"), 
+nrow = nrow(pvals_permute), ncol = ncol(pvals_permute))
+sum(p_adj_control <= 0.05, na.rm = TRUE)
+
+dimnames(p_adj_control) <- dimnames(correlation_matrix)
+
+ggplot() +
+  geom_density(aes(unlist(pvals_permute), color = "Permuted"), show.legend = TRUE) +
+  geom_density(aes(unlist(p_adj_control), color = "Adjusted"), show.legend = TRUE) +
+  labs(
+    title = "P adjusted (permuted) vs permuted values differences",
+    x = "pvals adjusted",
+    y = "Density") +
+    scale_y_continuous(limits = c(0, 3.5)) +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", size = 1) +
+  theme_minimal()
+```
+
+
+**Control permutation**
+```{r for_permute_c}
+# create a dataframe with all counts for permutation
+# select suitable genes from cpm.symbol
+df_long <- cpm.symbol[rownames(cpm.symbol) %in% downcorr_pairs_c$Var1, ] %>%
+rownames_to_column("Var1")
+
+# add the required columns from cpm.symbol
+downcorr_pairs_c <- downcorr_pairs_c %>%
+left_join(df_long, by = "Var1") %>%
+rename_with(~ paste0(.,"_rna"), starts_with("C_")) %>%
+select(-starts_with("Dfu_"))
+
+# now add the miRNA values
+df_long <- norm_data[rownames(norm_data) %in% downcorr_pairs_c$Var2, ] %>%
+rownames_to_column("Var2")
+# merge
+downcorr_pairs_c <- downcorr_pairs_c %>%
+  left_join(df_long, by = "Var2") %>%
+  rename_with(
+    ~ paste0(.,"_mir"), 
+    .cols = grep("^C_\\d+$", colnames(.), value = TRUE)
+  ) %>%
+  select(-starts_with("Dfu_"))
+```
+
+Now we permute and calculate the p_value. Comparing $P_{value} \leq P_{perm}$
+
+```{r permute_control, eval=F}
+permute_and_calculate <- function(per_table) {
+
+  permuted_table <- per_table
+
+  n_last <- ncol(permuted_table)
+  first_indx <- 5
+  gr_1 <- sum(grepl("rna", colnames(permuted_table))) + first_indx -1  
+  gr_2 <- gr_1 + 1
+
+# We shuffle the values for each row separately, only in the second group
+  permuted_table[, gr_2:n_last] <- t(apply(
+    permuted_table[, gr_2:n_last], 1, sample))
+
+  sapply(1:nrow(permuted_table), function(row_index) {
+    group1 <- as.numeric(permuted_table[row_index, first_indx:gr_1]) 
+    group2 <- as.numeric(permuted_table[row_index, gr_2:n_last]) 
+    cor(group1, group2, method = "spearman")})}
+
+
+# perm
+n_permutations <- 100
+perm_cor_list <- replicate(n_permutations, permute_and_calculate(downcorr_pairs_c), simplify = FALSE)
+
+perm_cor_list <- array(unlist(perm_cor_list), dim = c(nrow(downcorr_pairs_c), n_permutations))
+# p-value
+pvals_perm_c <- numeric(nrow(downcorr_pairs_c))
+
+for (i in 1:nrow(downcorr_pairs_c)) {
+  perm_cor_values <- perm_cor_list[i, ]
+  observed_corr <- downcorr_pairs_c$Freq[i]
+
+  pvals_perm_c[i] <- mean((perm_cor_values) <= (observed_corr))}
+
+saveRDS(pvals_perm_c, "/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/skip_permute_c.RDS")
+```
+
+```{r skip_perm_c}
+pvals_perm_c <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/skip_permute_c.RDS")
+downcorr_pairs_c$p_value <- pvals_perm_c 
+downcorr_pairs_c$p_adj <- p.adjust(pvals_perm_c, method = "fdr")
+```
+
+The p-values were binned to 100ths due to 100 permutations; increasing the order increased the range to 1000ths.
+
+All correlations were significant, most were 0. This is most likely due to the small sample size and the test's power. P-adjust replicates the p-values.
+
+Let's calculate how many unique RNAs and miRNAs are in our pairs.
+
+```{r unique_count_c, echo=F}
+cat("Unique RNA in Control:", length(unique(downcorr_pairs_c$Var1)), "из", nrow(downcorr_pairs_c), "\n")
+cat("Unique miRNA in Control:", length(unique(downcorr_pairs_c$Var2)), "из", nrow(downcorr_pairs_c), "\n")
+```
+
+**FECD permutation**
+
+```{r for_permute_fecd, eval=T}
+df_long <- cpm.symbol[rownames(cpm.symbol) %in% downcorr_pairs_f$Var1, ] %>% 
+  rownames_to_column("Var1")
+
+# add cpm.symbol
+downcorr_pairs_f <- downcorr_pairs_f %>%
+  left_join(df_long, by = "Var1") %>% 
+  rename_with(~ paste0(.,"_rna"), starts_with("Dfu_")) %>% 
+  select(-starts_with("C_"))
+
+# add miRNA counts
+common_samples <- intersect(colnames(cpm.symbol), colnames(norm_data))
+df_long <- norm_data[rownames(norm_data) %in% downcorr_pairs_f$Var2, ] %>% 
+  select(any_of(common_samples)) %>% 
+  rownames_to_column("Var2")
+
+# merge
+downcorr_pairs_f <- downcorr_pairs_f %>%
+  left_join(df_long, by = "Var2") %>%
+  rename_with(
+    ~ paste0(.,"_mir"), 
+    .cols = grep("^Dfu_\\d+$", colnames(.), value = TRUE)
+  ) %>%
+  select(-starts_with("C_"))
+```
+
+
+
+```{r permute_fecd, eval=F}
+permute_and_calculate_f <- function(per_table) {
+
+  permuted_table <- per_table
+  n_last <- ncol(permuted_table)
+  first_indx <- 5
+  gr_1 <- sum(grepl("rna", colnames(permuted_table))) + first_indx -1 
+  gr_2 <- gr_1 + 1
+
+  permuted_table[, gr_2:n_last] <- t(apply(
+    permuted_table[, gr_2:n_last], 1, sample))
+
+  sapply(1:nrow(permuted_table), function(row_index) {
+    group1 <- as.numeric(permuted_table[row_index, first_indx:gr_1]) 
+    group2 <- as.numeric(permuted_table[row_index, gr_2:n_last]) 
+    cor(group1, group2, method = "spearman")})
+}
+
+n_permutations <- 100
+perm_cor_list <- replicate(n_permutations, permute_and_calculate_f(downcorr_pairs_f), simplify = FALSE)
+
+perm_cor_list <- array(unlist(perm_cor_list), dim = c(nrow(downcorr_pairs_f), n_permutations))
+
+# p-value 
+pvals_perm_f <- numeric(nrow(downcorr_pairs_f))
+
+for (i in 1:nrow(downcorr_pairs_f)) {
+  perm_cor_values <- perm_cor_list[i, ]
+  observed_corr <- downcorr_pairs_f$Freq[i]
+  pvals_perm_f[i] <- mean((perm_cor_values) <= (observed_corr))}
+
+saveRDS(pvals_perm_f, "/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/skip_permute_f.RDS")
+```
+
+```{r, skip_perm_f}
+pvals_perm_f <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/skip_permute_f.RDS")
+downcorr_pairs_f$p_value <- pvals_perm_f 
+downcorr_pairs_f$p_adj <- p.adjust(pvals_perm_f, method = "fdr")
+```
+
+# Comparison of selected pairs miRNA-Target with expression groups and HCEC {.tabset}
+
+We've already obtained statistically significant negative correlations (miRNA–gene) in the Control and FECD groups. Now we need to:
+
+1. Confirm these relationships using independent data – use two RNA-seq samples: ours (our) and from the article (NAR). If the correlation is reproduced in both, the confidence in the pair is higher.
+
+2. Evaluate the magnitude of expression change – calculate the logarithmic ratio of FECD to Control (log₂FC). Select pairs with a strong change (|log₂FC| ≥ 2, i.e., at least a 4-fold difference).
+
+3. Screen out pairs that won't work in the HCEC cell line – compare gene expression in HCEC with that in FECD samples. Pairs where the gene differs only slightly from HCEC or changes in the opposite direction are less promising for further experiments.
+
+In summary, we obtain a short list of miRNA targets that are consistently negatively correlated in the two datasets, change significantly during disease, and differ from HCEC – such pairs are worth testing in cellular models.
+
+
+## Control vs groups and HCEC
+
+Add expression values by group from `cpm.symbol.group` and expression values in the HCEC cell line to the table. Remove the columns with counts.
+
+The cpm structure has changed; it is now a nested sheet. Let's parse it into separate tables.
+
+```{r}
+our <- as.data.frame(cpm.symbol.group$our)
+our$Gene <- rownames(cpm.symbol.group$our)
+
+nar <- as.data.frame(cpm.symbol.group$nar)
+nar$Gene <- rownames(cpm.symbol.group$nar)
+
+nar_our <- full_join(our, nar, by = "Gene", suffix = c(".our", ".nar"))
+rownames(nar_our) <- nar_our$Gene
+nar_our$nar_our <- NULL
+```
+
+```{r add_HCEC_groups}
+downcorr_pairs_c <- downcorr_pairs_c %>% 
+  select(-contains("C"), -pair) %>%
+
+  left_join(
+    nar_our %>% select(Ctrl.nar, Ctrl.our, FECD_exp.nar, FECD_noexp.nar, FECD_exp.our, FECD_noexp.our) %>% 
+      rownames_to_column(var = "Gene"),
+    by = c("Var1" = "Gene")) %>% 
+  rename(RNA = Var1, miRNA = Var2, Correlation = Freq)
+# add HCEC
+downcorr_pairs_c <- downcorr_pairs_c %>% 
+  left_join(
+    HCEC_cpm %>%
+      rownames_to_column(var = "Gene"),
+    by = c("RNA" = "Gene"))
+
+downcorr_pairs_c
+```
+
+Let's estimate the expression distribution. Scatterplots by FECD.
+
+We'll look at how similar the counts are in the datasets: ours and NAR's, to see if they are interchangeable.
+
+```{r check_cor_c, echo=F}
+paste('inside datasets')
+cor(downcorr_pairs_c$`FECD_exp.nar`, downcorr_pairs_c$FECD_noexp.nar)
+cor(downcorr_pairs_c$`FECD_exp.our`, downcorr_pairs_c$FECD_noexp.our)
+paste('between datasets')
+cor(downcorr_pairs_c$`FECD_exp.nar`, downcorr_pairs_c$FECD_exp.our)
+cor(downcorr_pairs_c$`FECD_exp.nar`, downcorr_pairs_c$FECD_noexp.our)
+cor(downcorr_pairs_c$`Ctrl.nar`, downcorr_pairs_c$Ctrl.our)
+```
+
+Using the selected genes in the table, we'll calculate the ratio between the nar:FECD and Ctrl groups, with FECD expanded and non-expanded, respectively. We'll look at the largest expression difference in these pairs. Then we'll compare it with expression in HCEC.
+
+The data are logarithmic, so to understand the difference, they need to be subtracted (not divided, as with raw counts). This yields the log fold change (not fc).
+
+>The logarithm is taken as a function of 2, as this represents one PCR cycle.
+
+
+```{r nar_fecd-control_HCEC}
+# FECD - Control
+downcorr_pairs_c$nar.fe <- (downcorr_pairs_c$FECD_exp.nar - downcorr_pairs_c$Ctrl.nar)
+downcorr_pairs_c$nar.fne <-(downcorr_pairs_c$FECD_noexp.nar - downcorr_pairs_c$Ctrl.nar)
+# HCEC
+downcorr_pairs_c$HCEC.fe <- (downcorr_pairs_c$FECD_exp.nar - downcorr_pairs_c$HCEC)
+downcorr_pairs_c$HCEC.fne <- (downcorr_pairs_c$FECD_noexp.nar - downcorr_pairs_c$HCEC)
+# almost same
+cor(downcorr_pairs_c$nar.fe, downcorr_pairs_c$nar.fne) 
+cor(downcorr_pairs_c$HCEC.fe, downcorr_pairs_c$HCEC.fne)
+```
+
+```{r vis_fc_hcec_c, echo=F}
+ggplot(downcorr_pairs_c, aes(x=nar.fe, y=FECD_exp.nar)) +
+  geom_point() +
+  geom_vline(xintercept = -2) + 
+  geom_vline(xintercept = 2) + 
+  geom_hline(yintercept = 2) +
+  labs(title = "Control: FECD_exp vs FECD-Control ") 
+ggplot(downcorr_pairs_c, aes(x=nar.fne, y=FECD_exp.nar)) +
+  geom_point() +
+  geom_vline(xintercept = -2) + 
+  geom_vline(xintercept = 2) + 
+  geom_hline(yintercept = 2) +
+  labs(title = "Control: FECD_no_exp vs nar FECD-Control ") 
+ggplot(downcorr_pairs_c, aes(x=HCEC.fe, y=FECD_exp.nar )) +
+  geom_point() +
+  geom_vline(xintercept = -2) + 
+  geom_vline(xintercept = 2) + 
+  geom_hline(yintercept = 2) +
+  labs(title = "Control: HCEC comparison") 
+```
+
+Let's get the final pairs. We'll extract the pairs by HCEC. I think we should do this in two separate lists and see how they intersect.
+
+Perhaps we should have only compared the selected final pairs with HCEC? Otherwise, we got the differential expression in HCEC in the second list and that's it. Probably just pairs.
+
+```{r}
+final_control <- downcorr_pairs_c %>% 
+  filter((nar.fe >= 2 & FECD_exp.nar >= 2) | (nar.fe <= -2 & FECD_exp.nar >= 2)) %>% 
+  mutate(check_HCEC = if_else(
+    (HCEC.fe >= 2 & FECD_exp.nar >= 2) | (HCEC.fe <= -2 & FECD_exp.nar >= 2),
+    "yes", "no"))
+knitr::kable(final_control)
+```
+
+**Total for Control:**
+
+- List of negatively correlated MIR-RNA pairs
+
+
+## FECD vs groups and HCEC
+
+We'll add expression values by group from `cpm.symbol.group` and expression values in the HCEC cell line to the table. We'll remove the columns with counts.
+
+Why: To analyze not just outliers in our set and individual samples, but consistently high-expression samples in two sets (ours, narugo), specifically in control samples. We additionally compared them with HCEC to identify a miRNA target subgroup for experimental validation in cell culture.
+
+```{r add_HCEC_groups_f}
+downcorr_pairs_f <- downcorr_pairs_f %>% 
+  select(-contains("Dfu"), -pair) %>%
+
+  left_join(
+    nar_our %>% select(Ctrl.nar, Ctrl.our, FECD_exp.nar, FECD_noexp.nar, FECD_exp.our, FECD_noexp.our) %>% 
+      rownames_to_column(var = "Gene"),
+    by = c("Var1" = "Gene")) %>% 
+  rename(RNA = Var1, miRNA = Var2, Correlation = Freq)
+
+# add HCEC
+downcorr_pairs_f <- downcorr_pairs_f %>% 
+  left_join(
+    HCEC_cpm %>%
+      rownames_to_column(var = "Gene"), by = c("RNA" = "Gene"))
+
+downcorr_pairs_f
+```
+
+Let's estimate the expression distribution. Scatterplots by FECD.
+
+We'll look at how similar the counts are in the datasets: ours and NAR's, to see if they are interchangeable.
+
+```{r check_cor_f}
+paste('inside datasets')
+cor(downcorr_pairs_f$`FECD_exp.nar`, downcorr_pairs_f$FECD_noexp.nar)
+cor(downcorr_pairs_f$`FECD_exp.our`, downcorr_pairs_f$FECD_noexp.our)
+paste('between datasets')
+cor(downcorr_pairs_f$`FECD_exp.nar`, downcorr_pairs_f$FECD_exp.our)
+cor(downcorr_pairs_f$`FECD_exp.nar`, downcorr_pairs_f$FECD_noexp.our)
+cor(downcorr_pairs_f$`Ctrl.nar`, downcorr_pairs_f$Ctrl.our)
+```
+
+Using the selected genes in the table, we'll calculate the ratio between the nar:FECD and Ctrl groups, with FECD expanded and non-expanded, respectively. We'll look at the largest expression difference in these pairs. Then we'll compare it with expression in HCEC.
+
+The data are logarithmic, so to understand the difference, they need to be subtracted (not divided, as with raw counts). This yields the log fold change (not fc).
+
+>The logarithm is taken as a function of 2, as this represents one PCR cycle.
+
+
+```{r nar_fecd-control_HCEC_f}
+# FECD - Control
+downcorr_pairs_f$nar.fe <- (downcorr_pairs_f$FECD_exp.nar - downcorr_pairs_f$Ctrl.nar)
+downcorr_pairs_f$nar.fne <-(downcorr_pairs_f$FECD_noexp.nar - downcorr_pairs_f$Ctrl.nar)
+# HCEC
+downcorr_pairs_f$HCEC.fe <- (downcorr_pairs_f$FECD_exp.nar - downcorr_pairs_f$HCEC)
+downcorr_pairs_f$HCEC.fne <- (downcorr_pairs_f$FECD_noexp.nar - downcorr_pairs_f$HCEC)
+
+cor(downcorr_pairs_f$nar.fe, downcorr_pairs_f$nar.fne) 
+cor(downcorr_pairs_f$HCEC.fe, downcorr_pairs_f$HCEC.fne)
+```
+
+```{r vis_fc_fecd, echo=T}
+ggplot(downcorr_pairs_f, aes(x=nar.fe, y=FECD_exp.nar)) +
+  geom_point() +
+  geom_vline(xintercept = -2) + 
+  geom_vline(xintercept = 2) + 
+  geom_hline(yintercept = 2) +
+  labs(title = "FECD: FECD_exp vs nar FECD-Control in FECD ") 
+
+ggplot(downcorr_pairs_f, aes(x=HCEC.fe, y=FECD_exp.nar )) +
+  geom_point() +
+  geom_vline(xintercept = -2) + 
+  geom_vline(xintercept = 2) + 
+  geom_hline(yintercept = 2) +
+  labs(title = "FECD: HCEC comparison") 
+```
+
+We're interested in the pairs in the top corners. Let's get the final pairs. We'll extract the pairs by HCEC. I think we should do this in two separate lists and see how they intersect.
+
+Perhaps we should have compared only the selected final pairs with HCEC? Otherwise, we got the differential expression in HCEC in the second list and that's it. Probably just the pairs.
+
+```{r}
+final_FECD <- downcorr_pairs_f %>% 
+  filter((nar.fe >= 2 & FECD_exp.nar >= 2) | (nar.fe <= -2 & FECD_exp.nar >= 2)) %>% 
+  mutate(check_HCEC = if_else(
+    (HCEC.fe >= 2 & FECD_exp.nar >= 2) | (HCEC.fe <= -2 & FECD_exp.nar >= -2),
+    "yes", "no"))
+
+knitr::kable(final_FECD)
+```
+
+
+
+# Final miRNA--Target gene pairs 
+
+We add the table from the annotation with strands and genes in the HGNC nomenclature to the obtained MIR-GEN pairs. Lets try Gencode and MIMAT annotaion (Mirbase). First we merge by HGNC symbol name, another one from MIMAT_ID, obtained from initial Nanostring miRNA table.
+
+## Gencode annotation {.tabset}
+
+### Final pairs Control
+
+```{r echo=F}
+final_control_HGNC <- final_control %>% left_join(annot_chipdf, by="miRNA") %>% select(where(~ !all(is.na(.)))) %>% 
+  relocate(RNA, miRNA, gene_name, HGNC_name, name_suffix, mir_strand, seqnames, start, strand, end, width, gene_id, ID, hgnc_id, Correlation, check_HCEC, p_value, p_adj, MIMAT_ID, source, gene_type, type, level, Ctrl.nar, Ctrl.our, FECD_exp.nar, FECD_noexp.nar, FECD_exp.our, FECD_noexp.our, HCEC, nar.fe, nar.fne, HCEC.fe, HCEC.fne)
+
+
+cat("Unique RNA in Control:", length(unique(final_control_HGNC$RNA)), "from", nrow(final_control_HGNC), "\n")
+cat("Unique miRNA in Control:", length(unique(final_control_HGNC$miRNA)), "from", nrow(final_control_HGNC), "\n")
+knitr::kable(final_control_HGNC)
+```
+
+### Final pairs FECD
+
+```{r echo=F}
+final_FECD_HGNC <- final_FECD %>% left_join(annot_chipdf, by="miRNA") %>% select(where(~ !all(is.na(.)))) %>% 
+relocate(RNA, miRNA, gene_name, HGNC_name, name_suffix, mir_strand, seqnames, start, strand, end, width, gene_id, ID, hgnc_id, Correlation, check_HCEC, p_value, p_adj, MIMAT_ID, source, gene_type, type, level, Ctrl.nar, Ctrl.our, FECD_exp.nar, FECD_noexp.nar, FECD_exp.our, FECD_noexp.our, HCEC, nar.fe, nar.fne, HCEC.fe, HCEC.fne)
+cat("Unique RNA in HGNC:", length(unique(final_FECD_HGNC$RNA)), "from", nrow(final_FECD_HGNC), "\n")
+cat("Unique miRNA in HGNC:", length(unique(final_FECD_HGNC$miRNA)), "from", nrow(final_FECD_HGNC), "\n")
+knitr::kable(final_FECD_HGNC, caption = "Final with strand for FECD")
+```
+
+### Intersection of 2 groups
+
+Are there any repeating pairs in the groups with gencode annotation?
+
+```{r intersect_fecd_control}
+intersect(final_FECD_HGNC$RNA, final_control_HGNC$RNA)
+intersect(final_FECD_HGNC$miRNA, final_control_HGNC$miRNA)
+```
+Intersection with differentially expressed
+
+```{r}
+knitr::kable(final_FECD_HGNC %>% filter(miRNA %in% diffexpressed_mirna_HGNC$miRNA), caption = "FECD")
+knitr::kable(final_control_HGNC %>% filter(miRNA %in% diffexpressed_mirna_HGNC$miRNA), caption = "Control")
+```
+
+
+Comparison of the number of final pairs for different versions of the target table (without deleting samples).
+
+| selected pairs + annot | V8       | V10 |
+|------------------------|----------|-----|
+| Control                | near 45 | 170 |
+| FECD                   | near 45 | 73  |
+
+## MIMAT table annotation {.tabset}
+
+Now we'll intersect the resulting pairs with the MIMAT gff table from Mirbase website. Combine them by name from gff. Remove the near-zero miRNAs obtained in 01_QC analysis part.
+
+```{r, echo=F}
+low_mirna <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/low_mirna.RDS")
+```
+
+### Final pairs Control
+
+```{r, echo=F}
+chip_mimat <- readRDS("/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/chip_mimat.RDS")
+
+final_control_MIMAT <- final_control %>% left_join(chip_mimat, by = c("miRNA" = "Name")) %>% select(where(~ !all(is.na(.)))) %>% 
+relocate(RNA, miRNA, MIMAT_ID, .before = everything() )
+
+cat("Length to:", nrow(final_control), "\n")
+cat("Length after:", nrow(final_control_MIMAT), "\n")
+
+cat("Unique RNA in Control:", length(unique(final_control_MIMAT$RNA)), "from", nrow(final_control_MIMAT), "\n")
+cat("Unique miRNA in Control:", length(unique(final_control_MIMAT$miRNA)), "from", nrow(final_control_MIMAT), "\n")
+
+intersect(low_mirna, final_control_MIMAT$miRNA)
+final_control_MIMAT <- final_control_MIMAT %>% filter(!(miRNA %in% low_mirna))
+knitr::kable(final_control_MIMAT)
+```
+
+### Final pairs FECD
+
+v2 - without excluded samples, v3 - without low miRNA.
+
+There are holes in the intersection – for some reason, this mimat ID is missing from the annotation. Sometimes a world is named without a suffix, but its ID has a suffix. It's better to merge by name.
+```{r, echo=F}
+final_FECD_MIMAT <- final_FECD %>%
+left_join(chip_mimat, by = c("miRNA" = "miRNA")) %>% select(where(~ !all(is.na(.)))) %>%
+relocate(RNA, miRNA, MIMAT_ID, .before = everything() )
+
+cat("Length before joining with annotation:", nrow(final_FECD), "\n")
+cat("Length after joining with annotation:", nrow(final_FECD_MIMAT), "\n")
+
+final_FECD_MIMAT <- final_FECD_MIMAT %>% filter(!(miRNA %in% low_mirna))
+cat("Length after filtering out near-zero miRNAs:", nrow(final_FECD_MIMAT), "\n")
+
+cat("Unique RNA in FECD:", length(unique(final_FECD_MIMAT$RNA)), "from", nrow(final_FECD_MIMAT), "\n")
+cat("Unique miRNA in FECD:", length(unique(final_FECD_MIMAT$miRNA)), "from", nrow(final_FECD_MIMAT), "\n")
+knitr::kable(final_FECD_MIMAT)
+```
+
+## Gencode vs MIMAT annotation comparison
+I obtain tables by merging with 2 annotations: Gencode and Mirbase. Let's compare them.
+
+```{r, echo=F}
+print('HGNC')
+cat("Unique RNA in Control HGNC:", length(unique(final_control_HGNC$RNA)), "from", nrow(final_control_HGNC), "\n")
+cat("Unique miRNA in Control HGNC:", length(unique(final_control_HGNC$miRNA)), "from", nrow(final_control_HGNC), "\n")
+cat("Unique RNA in FECD HGNC:", length(unique(final_FECD_HGNC$RNA)), "from", nrow(final_FECD_HGNC), "\n")
+cat("Unique miRNA in FECD HGNC:", length(unique(final_FECD_HGNC$miRNA)), "from", nrow(final_FECD_HGNC), "\n")
+
+print('mimat')
+cat("control Length wo annotation:", nrow(final_control), "\n")
+cat("control Length after:", nrow(final_control_MIMAT), "\n")
+
+cat("mimat Unique RNA in Control:", length(unique(final_control_MIMAT$RNA)), "from", nrow(final_control_MIMAT), "\n")
+cat("mimat Unique miRNA in Control:", length(unique(final_control_MIMAT$miRNA)), "from", nrow(final_control_MIMAT), "\n")
+
+cat("FECD Length wo annotation:", nrow(final_FECD), "\n")
+cat("FECD Length after:", nrow(final_FECD_MIMAT), "\n")
+
+cat("mimat Unique RNA in FECD:", length(unique(final_FECD_MIMAT$RNA)), "from", nrow(final_FECD_MIMAT), "\n")
+cat("mimat Unique miRNA in FECD:", length(unique(final_FECD_MIMAT$miRNA)), "from", nrow(final_FECD_MIMAT), "\n")
+```
+
+# Venn diagrams on results
+
+```{r fig.width=7, fig.height=5, echo=F}
+venn_list <- list(
+  `FECD RNA` = final_FECD_MIMAT$RNA,
+  `Control RNA` = final_control_MIMAT$RNA)
+
+ggVennDiagram(venn_list, force_upset = FALSE, label = "count") + 
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip() +
+    theme(plot.title = element_text(size = 15, hjust = 0.5),
+          legend.position = "none") +
+  labs(title = 'Unique targets in FECD and Control groups')
+
+```
+
+```{r fig.width=7, fig.height=5, echo=F}
+venn_list_mi <- list(
+  `FECD miRNA` = final_FECD_MIMAT$miRNA,
+  `Control miRNA` = final_control_MIMAT$miRNA)
+
+ggVennDiagram(venn_list_mi, label = "count" ) + 
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip() +
+  theme(plot.title = element_text(size = 15, hjust = 0.5),
+        legend.position = "none") +
+  labs(title = 'Unique MiRNA in FECD and Control groups')
+```
+
+All Venn:
+
+```{r, fig.width=11}
+venn_list_all <- list(
+  `All miRNA` = rownames(norm_data),
+  `FECD miRNA` = final_FECD_MIMAT$miRNA,
+  `Control miRNA` = final_control_MIMAT$miRNA,
+  `Diffexpressed \nmiRNA` = diffexpressed_mirna_HGNC$miRNA)
+
+ggVennDiagram(venn_list_all, label = "count" ) + 
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF")  +
+  theme(plot.title = element_text(size = 20, hjust = 0.5), legend.position = "none") +
+  labs(title = 'Intersections of the found groups with each other')
+```
+
+## Intersection with DE miRNA
+
+Lets intersect our results with diffexpressed miRNAs. 
+```{r, echo=F}
+knitr::kable(final_control_MIMAT %>% filter(miRNA %in% diffexpressed_mirna_HGNC$miRNA), caption = 'Control')
+knitr::kable(final_FECD_MIMAT %>% filter(miRNA %in% diffexpressed_mirna_HGNC$miRNA), caption = 'FECD')
+```
+
+
+```{r}
+length(intersect(final_FECD_MIMAT$RNA, final_FECD_HGNC$RNA))
+length(intersect(final_control_MIMAT$RNA, final_control_HGNC$RNA))
+
+length(intersect(final_FECD_MIMAT$miRNA, final_FECD_HGNC$miRNA))
+length(intersect(final_control_MIMAT$miRNA, final_control_HGNC$miRNA))
+```
+
+**Verdict:** The tables turned out to be virtually identical. It was decided to use the option with MIMAT identification, as it was more reliable.
+
+## Target expression level
+
+To confirm regulation, we will construct boxplots by group.
+
+```{r}
+final_FECD_MIMAT <- readRDS('/data7a/bio/human_genomics/fuchs_dystrophy/nanostring/analisys/RDS/final_FECD_MIMAT.RDS')
+# get genes
+hkgs <- c('TBP', 'GPI', 'GAPDH')
+to_check <- c('COL1A1', 'COL4A1', 'LAMC1', 'DICER1')
+genes_control <- c(unique(final_control_HGNC$RNA), hkgs)
+genes_FECD <- c(unique(final_FECD_MIMAT$RNA), hkgs)
+
+bp_control <- cpm.symbol[rownames(cpm.symbol) %in% genes_control,]
+bp_FECD <- cpm.symbol[rownames(cpm.symbol) %in% genes_FECD,]
+```
+
+```{r, echo=F, eval=F}
+for_box_long <- bp_control %>%
+  rownames_to_column(var = "Gene") %>% 
+  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Expression") %>% 
+  mutate(group = case_when(
+    str_detect(Sample, "C") ~ "Control",
+    str_detect(Sample, "D") ~ "FECD"
+  ))
+
+for_box_long$Expression <- log(for_box_long$Expression)
+
+ggplot(for_box_long, aes(x=Expression)) + geom_density()
+
+ggplot(for_box_long,  aes(x = group, y = Expression, fill = group)) +
+  geom_boxplot(show.legend = T)+
+  geom_jitter(position=position_jitter(0.3), cex=1.2) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "log Expression of genes negatively correlated with miRNA in the Control group", y = "Expression Level" ) +
+  facet_wrap(~Gene)
+```
+
+
+**Boxplots of FECD gene expression**
+
+```{r fig.height= 16, fig.width= 20}
+for_box_long <- bp_FECD %>%
+  rownames_to_column(var = "Gene") %>% 
+  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Expression") %>% 
+  mutate(fecd_group = case_when(
+    str_detect(Sample, "C") ~ "Control",
+    str_detect(Sample, "D") ~ "FECD"
+  )) %>% 
+  group_by(Gene, fecd_group) %>%
+  mutate(
+    Q1 = quantile(Expression, 0.25),
+    Q3 = quantile(Expression, 0.75),
+    IQR = Q3 - Q1,
+    is_outlier = ifelse(Expression < (Q1 - 1.5 * IQR) | Expression > (Q3 + 1.5 * IQR), TRUE, FALSE)
+  ) %>% ungroup()
+
+for_box_long$Expression <- log(for_box_long$Expression)
+for_box_long <- for_box_long %>% rename(Group = fecd_group)
+
+ggplot(for_box_long,  aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(show.legend = T)+
+  geom_jitter(position=position_jitter(0.3), cex=1.3) +
+  geom_text(
+    data = filter(for_box_long, is_outlier),
+    aes(label = Sample),
+    position = position_jitter(width = 0.2),
+    vjust = -1,
+    size = 3,
+    color = "black") +
+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        plot.title = element_text(size = 35, hjust = 0.5),
+        strip.text = element_text(size = 15)) +
+  labs(
+    title = expression("Expression of genes negatively correlated with miRNAs in the FECD group (" * log[2] * ")"),
+    y = expression(Log[2]~"Expression Level"), x='') +
+  facet_wrap(~Gene)
+```

@@ -32,6 +32,14 @@ Data preparation script. It performs identifier mapping and annotation formattin
 - Mapping MIMAT IDs to miRBase GFF3 entries
 - Identifying mirtrons (miRNAs located within host genes) and nearby genomic regions
 
+### 03_target_correlation
+
+- Compute Spearman correlations (miRNA vs gene) separately for Control and FECD
+- Keep negatively correlated pairs (≤ –0.7) as candidate miRNA–target interactions
+- Filter by miRTarBase v10 (experimentally supported targets)
+- Annotate with Gencode (HGNC, strands, coordinates) and MIMAT (mirBase)
+- Venn diagrams + boxplots for expression validation
+
 ### 04_KEGG pathway search
 
 KEGG enrichment analysis for miRNA targets (DEGs and miR-29). Outputs top pathways, frequency of gene occurrence, plots with `pathview`.
