@@ -7,7 +7,7 @@ You can download the HTML files from the `html_reports` directory to explore int
 
 ### 01_QC
 
-This module performs quality control and differential expression analysis of miRNA NanoString data from FECD patients and healthy controls.
+This module performs quality control and differential expression analysis of miRNA NanoString data from FECD patients and healthy controls. It identifies 98 differentially expressed miRNAs (mostly up‑regulated in FECD), validates them against public miRNA in FECD data, and highlights the downregulation of the miR‑29 family along with the upregulation of its extracellular matrix targets.
 
 **Key steps:**
 
@@ -24,7 +24,7 @@ This module performs quality control and differential expression analysis of miR
 
 Data preparation script. It performs identifier mapping and annotation formatting that is necessary for downstream analyses but is not intended for direct review.
 
-**What happens here:**
+**Key steps:**
 
 - Standardisation of miRNA names to HGNC symbols (e.g., `LET7A` → `MIRLET7A`)
 - Merging chip probe sets with Gencode GTF annotation (genes, coordinates, strands)
@@ -33,6 +33,10 @@ Data preparation script. It performs identifier mapping and annotation formattin
 - Identifying mirtrons (miRNAs located within host genes) and nearby genomic regions
 
 ### 03_target_correlation
+
+In this script, we integrate miRNA expression with RNA‑seq transcriptomes to identify potential miRNA–gene regulatory interactions. Spearman correlation, permutation testing, and external dataset validation are used to select negatively correlated pairs that are further filtered by experimental target databases and differential expression thresholds. The final output is a set of high‑confidence miRNA–target pairs associated with Fuchs dystrophy.
+
+**Key steps:**
 
 - Compute Spearman correlations (miRNA vs gene) separately for Control and FECD
 - Keep negatively correlated pairs (≤ –0.7) as candidate miRNA–target interactions
